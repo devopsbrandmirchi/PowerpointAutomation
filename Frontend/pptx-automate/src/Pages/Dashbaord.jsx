@@ -256,7 +256,7 @@ function ReportGenerationModal({
         ) : (
           <div className="px-5 pb-5 pt-4 sm:px-6 sm:pb-6 sm:pt-5">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-              <h3 className="font-display text-lg font-bold text-primary">Generating for {clientName}…</h3>
+              <h3 className="font-display text-lg font-bold text-primary">**Generating for {clientName}…</h3>
               <div className="flex shrink-0 items-center gap-2 font-mono text-xs text-on-surface-variant">
                 <span className="rounded-md bg-surface-container-high px-2 py-1 font-semibold text-primary">
                   Elapsed {formatElapsed(elapsedMs)}
