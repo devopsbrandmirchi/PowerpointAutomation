@@ -1,0 +1,57 @@
+[
+    {
+        "date": "2026-04-09",
+        "campaign_id": "22422135483",
+        "campaign_name": "WA | Search | Generic Used | Illinois",
+        "cost": 11.14,
+        "impressions": 82,
+        "clicks": 12,
+        "cpc": 0.9283333333333333,
+        "ctr": 0.14634146341463414,
+        "impression_share": 0.124
+    },
+    {
+        "date": "2026-04-09",
+        "campaign_id": "22422193563",
+        "campaign_name": "WA | Search | Brand | Indiana",
+        "cost": 7.9,
+        "impressions": 104,
+        "clicks": 37,
+        "cpc": 0.21351351351351353,
+        "ctr": 0.3557692307692308,
+        "impression_share": 0.7307692307692307
+    },
+    {
+        "date": "2026-04-09",
+        "campaign_id": "22422237561",
+        "campaign_name": "WA | Search | Dealer | Indiana",
+        "cost": 18.393509,
+        "impressions": 233,
+        "clicks": 22,
+        "cpc": 0.8360685909090909,
+        "ctr": 0.0944206008583691,
+        "impression_share": 0.12090163934426229
+    },
+    {
+        "date": "2026-04-09",
+        "campaign_id": "22422356337",
+        "campaign_name": "WA | Search | Brand | Iowa",
+        "cost": 0.43,
+        "impressions": 12,
+        "clicks": 5,
+        "cpc": 0.086,
+        "ctr": 0.4166666666666667,
+        "impression_share": 1.0
+    },
+    {
+        "date": "2026-04-09",
+        "campaign_id": "22422398796",
+        "campaign_name": "WA | Search | Generic used | Iowa",
+        "cost": 1.88,
+        "impressions": 31,
+        "clicks": 2,
+        "cpc": 0.94,
+        "ctr": 0.06451612903225806,
+        "impression_share": 0.11210762331838565
+    }
+]

@@ -1,0 +1,57 @@
+# --- Dependencies ---
+node_modules/
+
+# --- Build output ---
+dist/
+dist-ssr/
+build/
+*.local
+
+# --- Env (keep .env.example tracked) ---
+.env
+.env.*
+!.env.example
+
+# --- Logs ---
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# --- Vite / tooling caches ---
+.vite/
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+.prettiercache
+
+# --- Tests / coverage ---
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+
+# --- IDE ---
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Optional monorepo / misc ---
+.turbo/
+.vercel/
+.netlify/

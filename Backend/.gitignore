@@ -1,0 +1,77 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# --- Env & secrets (never commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+oauth_credentials.json
+ga4-credentials.json
+google-ads.yaml
+*-credentials.json
+
+# --- Test / coverage ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Jupyter / misc ---
+.ipynb_checkpoints/
+*.log
+*.tmp
+*.temp
+.cache/
+
+# --- Local scratch (uncomment if you keep test decks only locally) ---
+# *.pptx
+# *.xlsx

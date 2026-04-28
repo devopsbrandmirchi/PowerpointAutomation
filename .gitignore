@@ -1,0 +1,24 @@
+# Repo root (monorepo) — Backend/Frontend have their own .gitignore files too.
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs & temp
+*.log
+*.tmp
+.cache/
+
+# If you add root-level Node tooling later
+node_modules/
+
+# Env at repo root (if any)
+.env
+.env.local

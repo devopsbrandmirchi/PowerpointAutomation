@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+/* Design system: Architectural Precision — tonal depth, no hard dividers */
+@theme {
+  --color-primary: #002e59;
+  --color-primary-container: #0c447c;
+  --color-secondary: #3e6a00;
+  --color-on-primary: #ffffff;
+  --color-surface: #fbf9f8;
+  --color-surface-container-low: #f5f3f3;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-high: #e9e8e7;
+  --color-on-surface: #1b1c1c;
+  --color-on-surface-variant: #424750;
+  --color-error: #ba1a1a;
+  --color-outline-variant: #c2c6d1;
+
+  --font-display: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  --shadow-ambient: 0 20px 40px rgba(27, 28, 28, 0.06);
+
+  --animate-fade-in-down: fade-in-down 0.45s ease-out both;
+}
+
+@keyframes fade-in-down {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+body {
+  margin: 0;
+  min-height: 100svh;
+  background-color: var(--color-surface);
+  color: var(--color-on-surface);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: 100svh;
+}
