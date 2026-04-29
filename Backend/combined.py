@@ -16,8 +16,11 @@ sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
 # Account row table
 CLIENT_ACCOUNT_TABLE = os.environ.get("SUPABASE_CLIENT_TABLE", "google_ads_accounts")
 
-# Setup GA4 Authentication
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "ga4-credentials.json"
+# Setup GA4 Authentication (strictly from GA4_CREDENTIALS)
+ga4_credentials_path = os.environ.get("GA4_CREDENTIALS")
+if not ga4_credentials_path:
+    raise RuntimeError("GA4_CREDENTIALS env var is required but not set.")
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = ga4_credentials_path
 ga4_client = BetaAnalyticsDataClient()
 
 # --- UTILITIES ---
