@@ -29,16 +29,76 @@ AUCTION_INSIGHTS_DRIVE_FOLDER_ID = os.environ.get(
     "1pR1oWgzhA51YZm1c9MnZt3LULHLp_gAJ",
 )
 
+
+def _parse_cors_origins(raw: Optional[str]) -> list[str]:
+    if not raw or not str(raw).strip():
+        return []
+    return [p.strip().rstrip("/") for p in str(raw).split(",") if p.strip()]
+
+
+def _build_cors_kwargs() -> dict:
+    """
+    CORS for local dev + Vercel (and other frontends).
+
+    - Browsers reject allow_origins=['*'] together with allow_credentials=True.
+      We never combine those two.
+
+    Set in .env:
+      CORS_ORIGINS=https://your-app.vercel.app,https://www.yourdomain.com
+      FRONTEND_URL=https://your-app.vercel.app   (optional single origin, merged in)
+
+    Vercel preview URLs (branch deploys) change each time; allow them with:
+      CORS_ORIGIN_REGEX=https://.*\\.vercel\\.app
+
+    Open API to any origin (no cookies / credentialed browser calls):
+      CORS_ALLOW_ALL=true
+    """
+    allow_all = os.environ.get("CORS_ALLOW_ALL", "").lower() in ("1", "true", "yes")
+    if allow_all:
+        return {
+            "allow_origins": ["*"],
+            "allow_origin_regex": None,
+            "allow_credentials": False,
+            "allow_methods": ["*"],
+            "allow_headers": ["*"],
+        }
+
+    origins: set[str] = set()
+    for o in (
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ):
+        origins.add(o)
+    origins.update(_parse_cors_origins(os.environ.get("CORS_ORIGINS")))
+    origins.update(_parse_cors_origins(os.environ.get("FRONTEND_URL")))
+
+    regex = (os.environ.get("CORS_ORIGIN_REGEX") or "").strip() or None
+
+    origin_list = sorted(origins)
+    if not origin_list and not regex:
+        # Safe default for local scripts / quick tests (no credentials).
+        return {
+            "allow_origins": ["*"],
+            "allow_origin_regex": None,
+            "allow_credentials": False,
+            "allow_methods": ["*"],
+            "allow_headers": ["*"],
+        }
+
+    return {
+        "allow_origins": origin_list,
+        "allow_origin_regex": regex,
+        "allow_credentials": True,
+        "allow_methods": ["*"],
+        "allow_headers": ["*"],
+    }
+
+
 app = FastAPI(title="Wheeler Automation API")
 
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, **_build_cors_kwargs())
 
 executor = ThreadPoolExecutor(max_workers=5)
 _sb = None
