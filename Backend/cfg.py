@@ -23,9 +23,9 @@ def generate_client_auction_report(customer_id, start_date, end_date, month_labe
 
     # 3. Build the exact config your script expects
     cfg = {
-        'google_ads_customer_id': client_data['customer_id'],
-        'excel_drive_id': client_data['excel_drive_id'], # The specific Google Drive file ID for this client
-        'campaigns': campaign_dict
+        'customer_id': client_data['customer_id'],
+        'excel_drive_id': client_data['excel_drive_id'],  # The specific Google Drive file ID for this client
+        'campaigns': campaign_dict,
     }
 
     # 4. Trigger your heavy-lifting script

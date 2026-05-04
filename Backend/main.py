@@ -1,5 +1,5 @@
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from datetime import datetime
@@ -12,22 +12,22 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
-import tempfile
 
 # PPT Generator
+from auction_insights import generate_auction_xlsx, upload_excel_to_drive
 from pptx_fill import run_ppt_job
 from sync_ads_to_db_GA4 import sync_ga4_data
 
-# --- EXCEL & GOOGLE ADS IMPORTS ---
-from google.ads.googleads.client import GoogleAdsClient
-from openpyxl import load_workbook, Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from drive_utils import get_drive_service, download_file, update_file
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
 CLIENT_CONFIG_TABLE = os.environ.get("SUPABASE_CLIENT_TABLE", "google_ads_accounts")
+
+AUCTION_INSIGHTS_DRIVE_FOLDER_ID = os.environ.get(
+    "AUCTION_INSIGHTS_DRIVE_FOLDER_ID",
+    "1pR1oWgzhA51YZm1c9MnZt3LULHLp_gAJ",
+)
 
 app = FastAPI(title="Wheeler Automation API")
 
@@ -68,13 +68,12 @@ class GenerateRequest(BaseModel):
     start_date: str
     end_date: str
     generate_ppt: bool = True
-    generate_excel: bool = True
 
-class ReportRequest(BaseModel):
+class AuctionInsightsRequest(BaseModel):
     customer_id: str
-    start_date: str
-    end_date: str
     month_label: str
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
 
 class AutomationLogCreate(BaseModel):
     status: str
@@ -103,153 +102,6 @@ class Ga4SyncStreamRequest(BaseModel):
 
     client_id: Optional[str] = None
 
-
-# ==========================================
-# --- 2. EXCEL & GOOGLE ADS LOGIC ---
-# ==========================================
-
-HEADER_FILL = PatternFill(fill_type='solid', fgColor='1F4E79')
-HEADER_FONT = Font(name='Calibri', color='FFFFFF', bold=True, size=11)
-THIN_BORDER = Border(bottom=Side(border_style='thin', color='DDDDDD'))
-
-def get_ads_client():
-    yaml_path = os.environ.get('GOOGLE_ADS_YAML', str(BASE_DIR / 'Backend/google-ads.yaml'))
-    
-    if not os.path.exists(yaml_path):
-        raise FileNotFoundError(f"CRITICAL: Could not find Google Ads config at {yaml_path}. Make sure 'google-ads.yaml' is in the same folder as main.py!")
-        
-    return GoogleAdsClient.load_from_storage(yaml_path)
-
-def pull_auction_insights(ads_client, customer_id, campaign_id, start_date, end_date):
-    query = f"""
-        SELECT
-            auction_insight.domain,
-            metrics.auction_insight_search_impression_share,
-            metrics.auction_insight_search_overlap_rate,
-            metrics.auction_insight_search_outranking_share,
-            metrics.auction_insight_search_position_above_rate,
-            metrics.auction_insight_search_top_impression_percentage
-        FROM campaign
-        WHERE campaign.id = {campaign_id}
-            AND segments.date BETWEEN '{start_date}' AND '{end_date}'
-        ORDER BY metrics.auction_insight_search_impression_share DESC
-    """
-    ga_service = ads_client.get_service('GoogleAdsService')
-    response = ga_service.search(customer_id=str(customer_id), query=query)
-    rows = []
-    for row in response:
-        m = row.metrics
-        rows.append([
-            row.auction_insight.domain,
-            f"{m.auction_insight_search_impression_share * 100:.1f}%",
-            f"{m.auction_insight_search_overlap_rate * 100:.1f}%",
-            f"{m.auction_insight_search_outranking_share * 100:.1f}%",
-            f"{m.auction_insight_search_position_above_rate * 100:.1f}%",
-            f"{m.auction_insight_search_top_impression_percentage * 100:.1f}%",
-        ])
-    return rows
-
-def pull_search_terms(ads_client, customer_id, campaign_id, start_date, end_date):
-    query = f"""
-        SELECT
-            search_term_view.search_term,
-            segments.keyword.info.match_type,
-            metrics.impressions,
-            metrics.clicks,
-            metrics.ctr,
-            metrics.average_cpc,
-            metrics.conversions
-        FROM search_term_view
-        WHERE campaign.id = {campaign_id}
-            AND segments.date BETWEEN '{start_date}' AND '{end_date}'
-        ORDER BY metrics.impressions DESC
-        LIMIT 200
-    """
-    ga_service = ads_client.get_service('GoogleAdsService')
-    response = ga_service.search(customer_id=str(customer_id), query=query)
-    rows = []
-    for row in response:
-        m = row.metrics
-        rows.append([
-            row.search_term_view.search_term,
-            row.segments.keyword.info.match_type.name.replace('_', ' ').title(),
-            m.impressions,
-            m.clicks,
-            f"{m.ctr * 100:.2f}%",
-            f"${m.average_cpc / 1_000_000:.2f}",
-            round(m.conversions, 1),
-        ])
-    return rows
-
-def write_excel_tab(workbook, tab_name, headers, rows, header_color='1F4E79'):
-    if tab_name in workbook.sheetnames:
-        del workbook[tab_name]
-    
-    ws = workbook.create_sheet(title=tab_name)
-    header_fill = PatternFill(fill_type='solid', fgColor=header_color)
-    
-    for col_idx, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col_idx, value=header)
-        cell.fill = header_fill
-        cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-        
-    ws.row_dimensions[1].height = 20
-    
-    for row_idx, row_data in enumerate(rows, 2):
-        for col_idx, value in enumerate(row_data, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
-            cell.alignment = Alignment(vertical='center')
-            cell.border = THIN_BORDER
-            
-    for col in ws.columns:
-        max_length = 0
-        for cell in col:
-            try:
-                if cell.value:
-                    max_length = max(max_length, len(str(cell.value)))
-            except: pass
-        ws.column_dimensions[col[0].column_letter].width = min(max_length + 4, 50)
-    return ws
-
-def run_auction_job(cfg, start_date, end_date, month_label):
-    drive = get_drive_service()
-    ads_client = get_ads_client()
-    customer_id = str(cfg['google_ads_customer_id']).replace('-', '')
-
-    AUCTION_HEADERS = ['Competitor Domain', 'Impression Share', 'Overlap Rate', 'Outranking Share', 'Position Above Rate', 'Top of Page Rate']
-    SEARCH_HEADERS = ['Search Term', 'Match Type', 'Impressions', 'Clicks', 'CTR', 'Avg CPC', 'Conversions']
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        local_excel = os.path.join(tmp_dir, 'auction_insights.xlsx')
-        
-        print("Downloading existing Excel from Google Drive...")
-        download_file(drive, cfg['excel_drive_id'], local_excel)
-        wb = load_workbook(local_excel)
-        
-        for campaign_id, campaign_name in cfg.get('campaigns', {}).items():
-            print(f"Processing campaign: {campaign_name} ({campaign_id})")
-            
-            # Auction Insights
-            auction_rows = pull_auction_insights(ads_client, customer_id, campaign_id, start_date, end_date)
-            auction_tab = f"{month_label} - {campaign_name} - Auction"[:31]
-            write_excel_tab(wb, auction_tab, AUCTION_HEADERS, auction_rows, '1F4E79')
-
-            # Search Terms
-            search_rows = pull_search_terms(ads_client, customer_id, campaign_id, start_date, end_date)
-            search_tab = f"{month_label} - {campaign_name} - Search Terms"[:28] + "..." if len(f"{month_label} - {campaign_name} - Search Terms") > 31 else f"{month_label} - {campaign_name} - Search Terms"
-            write_excel_tab(wb, search_tab, SEARCH_HEADERS, search_rows, '375623')
-
-        wb.save(local_excel)
-        wb.close() 
-        print("Uploading updated Excel back to Google Drive...")
-        updated = update_file(drive, cfg['excel_drive_id'], local_excel, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        
-        return {
-            'status': 'success',
-            'drive_url': updated.get('webViewLink'),
-            'message': f"Excel updated successfully with {len(cfg.get('campaigns', {}))} campaigns."
-        }
 
 # ==========================================
 # --- 3. HELPER FUNCTIONS & WORKERS ---
@@ -303,8 +155,6 @@ def load_client_config(client_id: str):
         "customer_id": client_data.get("customer_id"),
         "template_drive_id": client_data.get("template_drive_id"),
         "output_file_drive_id": client_data.get("output_file_drive_id"),
-        # THE FIX: Add the new Excel column to the config dictionary
-        "excel_drive_id": client_data.get("excel_drive_id"), 
         "ga4_property_id": client_data.get("ga4_property_id"),
     }
 
@@ -325,18 +175,6 @@ def _generate_worker_sync(request: GenerateRequest, cfg: dict, month_label: str,
             except Exception as e:
                 result["ppt_error"] = str(e)
                 forward({"kind": "log", "message": f"ERROR (PowerPoint): {e}"})
-
-        if request.generate_excel:
-            forward({"kind": "log", "message": "Starting Auction Insights Excel step…"})
-            try:
-                # Calls the internal function directly now!
-                excel = run_auction_job(cfg, request.start_date, request.end_date, month_label)
-                result["excel"] = excel
-                msg = excel.get("message") if isinstance(excel, dict) else str(excel)
-                forward({"kind": "log", "message": str(msg)})
-            except Exception as e:
-                result["excel_error"] = str(e)
-                forward({"kind": "log", "message": f"ERROR (Excel): {e}"})
 
         out_q.put({"event": "result", "data": result})
     except Exception as e:
@@ -360,39 +198,100 @@ def _ga4_sync_worker(out_q: queue.Queue, client_id: Optional[str] = None):
         out_q.put(None)
 
 
-def generate_client_auction_report(customer_id: str, start_date: str, end_date: str, month_label: str):
-    sb = get_supabase()
-    
-    # THE FIX: Select the new excel_drive_id column
-    client_res = sb.table(CLIENT_CONFIG_TABLE).select('customer_id, excel_drive_id').eq('customer_id', customer_id).execute()
-    if not client_res.data:
-        print(f"Error: Client {customer_id} not found in DB.")
-        return
-        
-    client_data = client_res.data[0]
-    
-    # Query client campaigns
-    try:
-        campaigns_res = sb.table('client_campaigns').select('campaign_id, campaign_name').eq('customer_id', customer_id).execute()
-        campaign_dict = {camp['campaign_id']: camp['campaign_name'] for camp in campaigns_res.data}
-    except Exception:
-        print("Warning: Could not fetch campaigns. Defaulting to empty.")
-        campaign_dict = {}
+def _auction_insights_worker(body: "AuctionInsightsRequest", out_q: queue.Queue):
+    """Generates Auction Insights Excel + uploads to Drive while streaming log lines."""
 
-    cfg = {
-        'google_ads_customer_id': client_data['customer_id'],
-        # THE FIX: Map the config to use the new Excel column!
-        'excel_drive_id': client_data.get('excel_drive_id'), 
-        'campaigns': campaign_dict
-    }
+    def forward(msg: str):
+        out_q.put({"event": "progress", "payload": {"kind": "log", "message": msg}})
 
+    result: dict = {}
     try:
-        print(f"\n--- Starting Standalone Auction Job for {customer_id} ---")
-        result = run_auction_job(cfg, start_date, end_date, month_label)
-        print(f" -> DEBUG RESULT: {result}")
-        print("--- Standalone Auction Job Complete! ---\n")
+        customer_id = str(body.customer_id or "").strip()
+        month_label = str(body.month_label or "").strip()
+        if not customer_id:
+            raise ValueError("customer_id is required.")
+        if not month_label:
+            raise ValueError("month_label is required.")
+
+        forward(f"Started Auction Report for customer {customer_id} ({month_label}).")
+
+        sb = get_supabase()
+        dealer_name = customer_id
+        if sb:
+            try:
+                cfg_res = (
+                    sb.table(CLIENT_CONFIG_TABLE)
+                    .select("descriptive_name")
+                    .eq("customer_id", customer_id)
+                    .limit(1)
+                    .execute()
+                )
+                cfg_row = (cfg_res.data or [{}])[0]
+                dealer_name = cfg_row.get("descriptive_name") or customer_id
+            except Exception as cfe:
+                forward(f"WARNING: could not fetch dealer name from Supabase: {cfe}")
+
+        drive_folder_id = AUCTION_INSIGHTS_DRIVE_FOLDER_ID
+        forward(f"Drive folder ready (id: {drive_folder_id}).")
+
+        start_date = (str(body.start_date or "").strip() or None)
+        end_date = (str(body.end_date or "").strip() or None)
+        if start_date and end_date:
+            forward(
+                f"Fetching Auction data from Supabase for {dealer_name} "
+                f"(report_date {start_date} → {end_date})…"
+            )
+        else:
+            forward(f"Fetching Auction data from Supabase for {dealer_name} ({month_label})…")
+
+        local_file = generate_auction_xlsx(
+            customer_id,
+            month_label,
+            dealer_name=dealer_name,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if not local_file:
+            forward(
+                f"ERROR: No auction rows found in Supabase for {customer_id} / {month_label}."
+            )
+            result["excel_error"] = (
+                f"No Auction data found for {customer_id} in {month_label}."
+            )
+            out_q.put({"event": "result", "data": result})
+            return
+
+        forward(f"Excel generated locally: {local_file}")
+
+        drive_url = None
+        forward("Uploading Excel to Google Drive…")
+        try:
+            drive_url = upload_excel_to_drive(local_file, drive_folder_id)
+        except Exception as ue:
+            forward(f"ERROR (Drive upload): {ue}")
+        if drive_url:
+            forward(f"Uploaded successfully. URL: {drive_url}")
+        else:
+            forward("ERROR: Drive upload did not return a link.")
+
+        result["excel"] = {
+            "filename": os.path.basename(str(local_file)),
+            "drive_url": drive_url,
+            "message": (
+                "Auction Insights uploaded to Google Drive."
+                if drive_url
+                else "Auction Insights generated but Drive upload failed."
+            ),
+        }
+        forward("=== RESULT ===")
+        forward(result["excel"]["message"])
+
+        out_q.put({"event": "result", "data": result})
     except Exception as e:
-        print(f"--- Auction Job Failed: {e} ---")
+        forward(f"ERROR: {e}")
+        out_q.put({"event": "error", "detail": str(e)})
+    finally:
+        out_q.put(None)
 
 
 # ==========================================
@@ -443,10 +342,6 @@ async def generate(request: GenerateRequest):
         try: result["ppt"] = await loop.run_in_executor(executor, run_ppt_job, cfg, request.start_date, request.end_date, month_label)
         except Exception as e: result["ppt_error"] = str(e)
 
-    if request.generate_excel:
-        try: result["excel"] = await loop.run_in_executor(executor, run_auction_job, cfg, request.start_date, request.end_date, month_label)
-        except Exception as e: result["excel_error"] = str(e)
-
     return result
 
 @app.post("/generate-stream")
@@ -495,18 +390,53 @@ async def ga4_sync_stream(body: Ga4SyncStreamRequest):
     headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
     return StreamingResponse(event_iter(), media_type="text/event-stream", headers=headers)
 
-
 @app.post("/api/reports/generate-auction-insights")
-async def trigger_auction_report(req: ReportRequest, background_tasks: BackgroundTasks):
-    # Triggers the newly integrated function in the background!
-    background_tasks.add_task(
-        generate_client_auction_report, 
-        req.customer_id, 
-        req.start_date, 
-        req.end_date, 
-        req.month_label
-    )
-    return {"message": "Auction report generation started in the background."}
+def generate_auction_insights_report(body: AuctionInsightsRequest):
+    """Synchronous fallback. Prefer /api/reports/generate-auction-insights-stream for live logs."""
+    out_q: queue.Queue = queue.Queue()
+    threading.Thread(target=_auction_insights_worker, args=(body, out_q), daemon=True).start()
+    final_result: dict = {}
+    error_detail: Optional[str] = None
+    while True:
+        item = out_q.get()
+        if item is None:
+            break
+        if item.get("event") == "result":
+            final_result = item.get("data") or {}
+        elif item.get("event") == "error":
+            error_detail = item.get("detail") or "Unknown error"
+
+    if error_detail:
+        raise HTTPException(status_code=500, detail=error_detail)
+    excel = (final_result or {}).get("excel") or {}
+    return {
+        "status": "success" if excel.get("drive_url") else "partial",
+        "filename": excel.get("filename"),
+        "drive_url": excel.get("drive_url"),
+        "message": excel.get("message")
+        or final_result.get("excel_error")
+        or "Auction Insights run finished.",
+    }
+
+
+@app.post("/api/reports/generate-auction-insights-stream")
+async def generate_auction_insights_stream(body: AuctionInsightsRequest):
+    """Stream live progress (logs + final result) for Auction Insights generation."""
+    out_q: queue.Queue = queue.Queue()
+    loop = asyncio.get_running_loop()
+    threading.Thread(target=_auction_insights_worker, args=(body, out_q), daemon=True).start()
+
+    async def event_iter():
+        while True:
+            item = await loop.run_in_executor(None, out_q.get)
+            if item is None:
+                break
+            yield f"data: {json.dumps(item, default=str)}\n\n"
+            await asyncio.sleep(0)
+
+    headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+    return StreamingResponse(event_iter(), media_type="text/event-stream", headers=headers)
+
 
 # ==========================================
 # --- 5. LOGS & DB REPORTS ---
@@ -584,13 +514,15 @@ if __name__ == "__main__":
     
     if RUN_TEST_MODE:
         print("\n=== RUNNING IN TEST MODE ===")
-        TEST_CUSTOMER_ID = "5691491477"
+        TEST_CLIENT_ID = "replace-with-client-id"
         START_DATE = "2026-03-01"
         END_DATE = "2026-03-31"
         MONTH_LABEL = "March 2026"
         
-        # This will run the entire DB lookup, Google Ads fetch, and Excel upload instantly
-        generate_client_auction_report(TEST_CUSTOMER_ID, START_DATE, END_DATE, MONTH_LABEL)
+        # This runs the PPT job only (Auction Insights flow removed).
+        cfg = load_client_config(TEST_CLIENT_ID)
+        result = run_ppt_job(cfg, START_DATE, END_DATE, MONTH_LABEL)
+        print(result)
         print("=== TEST COMPLETE ===\n")
         
     # ==========================================

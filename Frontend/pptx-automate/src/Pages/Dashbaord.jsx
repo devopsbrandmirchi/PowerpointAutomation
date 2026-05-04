@@ -5,7 +5,13 @@ import SessionGuard from '../middleware/SessionGuard';
 import { AgencyProvider, useAgency } from '../context/AgencyContext';
 import { buildGeneratedFiles } from '../lib/wheelerDrive';
 import { DateRangePicker } from '../Components/DatePicker';
-import { fetchClients, postAutomationLog, postDriveReport, postGenerateStream } from '../lib/api';
+import {
+  fetchClients,
+  postAutomationLog,
+  postDriveReport,
+  postGenerateAuctionInsightsStream,
+  postGenerateStream,
+} from '../lib/api';
 import { writeDriveReportPing } from '../lib/driveReportPing';
 
 function formatElapsed(ms) {
@@ -28,6 +34,13 @@ function deriveOverallPercent(lines) {
     if (t.includes('Placeholders replaced')) p = Math.max(p, 74);
     if (t.includes('Uploading and overwriting')) p = Math.max(p, 82);
     if (t.includes('Updated and renamed')) p = Math.max(p, 92);
+    if (t.includes('Started Auction Report')) p = Math.max(p, 8);
+    if (t.includes('Looking up dealer Drive folder')) p = Math.max(p, 18);
+    if (t.includes('Drive folder ready')) p = Math.max(p, 28);
+    if (t.includes('Fetching Auction data')) p = Math.max(p, 42);
+    if (t.includes('Excel generated locally')) p = Math.max(p, 65);
+    if (t.includes('Uploading Excel to Google Drive')) p = Math.max(p, 80);
+    if (t.includes('Uploaded successfully')) p = Math.max(p, 96);
     if (t.includes('=== RESULT ===')) p = 100;
     if (t.includes('URL:')) p = Math.max(p, 98);
     if (t.includes('ERROR')) p = Math.min(p, 95);
@@ -46,7 +59,7 @@ function initialReportRange() {
 
 function collectGeneratedFiles(clientKey, exportMode, result) {
   const list = [];
-  if (result?.ppt && (exportMode === 'ppt' || exportMode === 'both')) {
+  if (result?.ppt) {
     list.push({
       name: result.ppt.filename || `${clientKey}_report.pptx`,
       kind: 'pptx',
@@ -54,9 +67,9 @@ function collectGeneratedFiles(clientKey, exportMode, result) {
       driveUrl: result.ppt.drive_url,
     });
   }
-  if (result?.excel?.drive_url && (exportMode === 'excel' || exportMode === 'both')) {
+  if (result?.excel) {
     list.push({
-      name: result.excel.filename || 'Auction_Insights.xlsx',
+      name: result.excel.filename || `Auction_Insights_${clientKey}.xlsx`,
       kind: 'xlsx',
       label: 'Auction Insights Excel',
       driveUrl: result.excel.drive_url,
@@ -137,7 +150,11 @@ function ReportGenerationModal({
   if (!open) return null;
 
   const successHeadline =
-    exportMode === 'both' ? 'Both files ready' : exportMode === 'ppt' ? 'PowerPoint ready' : 'Excel ready';
+    exportMode === 'both'
+      ? 'Both files ready'
+      : exportMode === 'auction'
+        ? 'Auction Insights ready'
+        : 'PowerPoint ready';
 
   const handleViewDrive = () => {
     window.open('https://drive.google.com', '_blank', 'noopener,noreferrer');
@@ -197,7 +214,7 @@ function ReportGenerationModal({
             {(generationResult?.ppt_error || generationResult?.excel_error) && (
               <div className="mt-4 rounded-lg border border-amber-200/80 bg-amber-50/95 px-3 py-2 text-left text-xs text-amber-950">
                 {generationResult?.ppt_error ? <p className="font-medium">PowerPoint: {generationResult.ppt_error}</p> : null}
-                {generationResult?.excel_error ? <p className="mt-1 font-medium">Excel: {generationResult.excel_error}</p> : null}
+                {generationResult?.excel_error ? <p className="mt-1 font-medium">Auction Insights: {generationResult.excel_error}</p> : null}
               </div>
             )}
 
@@ -256,7 +273,15 @@ function ReportGenerationModal({
         ) : (
           <div className="px-5 pb-5 pt-4 sm:px-6 sm:pb-6 sm:pt-5">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-              <h3 className="font-display text-lg font-bold text-primary">**Generating for {clientName}…</h3>
+              <h3 className="font-display text-lg font-bold text-primary">
+                Generating{' '}
+                {exportMode === 'both'
+                  ? 'PowerPoint + Auction Insights'
+                  : exportMode === 'auction'
+                    ? 'Auction Insights'
+                    : 'PowerPoint'}{' '}
+                for {clientName}…
+              </h3>
               <div className="flex shrink-0 items-center gap-2 font-mono text-xs text-on-surface-variant">
                 <span className="rounded-md bg-surface-container-high px-2 py-1 font-semibold text-primary">
                   Elapsed {formatElapsed(elapsedMs)}
@@ -317,6 +342,7 @@ export function ReportGeneratorView() {
   const [generationResult, setGenerationResult] = useState(null);
   const [generationError, setGenerationError] = useState(null);
   const [streamLogLines, setStreamLogLines] = useState([]);
+  const [auctionLoading, setAuctionLoading] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [reportStartDate, setReportStartDate] = useState(() => initialReportRange().start);
   const [reportEndDate, setReportEndDate] = useState(() => initialReportRange().end);
@@ -467,6 +493,198 @@ export function ReportGeneratorView() {
       .catch(() => {});
   }, [generationPhase, generationResult, selectedClient, clientName, exportMode, reportStartDate, reportEndDate, scopeKey]);
 
+  const startAuctionInsights = async () => {
+    if (!selectedClient || !selectedMeta?.has_config || auctionLoading || isGenerating) return;
+    const customerId = selectedMeta?.customer_id || selectedClient;
+    const parsed = new Date(`${reportEndDate}T00:00:00`);
+    const monthLabel = Number.isNaN(parsed.getTime())
+      ? reportEndDate
+      : parsed.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+
+    setAuctionLoading(true);
+    setGenerationPhase('running');
+    setGenerationResult(null);
+    setGenerationError(null);
+    setStreamLogLines([]);
+    setElapsedMs(0);
+    const t0 = performance.now();
+
+    const body = {
+      customer_id: String(customerId),
+      month_label: monthLabel,
+      start_date: reportStartDate,
+      end_date: reportEndDate,
+    };
+
+    try {
+      const result = await postGenerateAuctionInsightsStream(body, (ev) => {
+        if (ev.event !== 'progress' || !ev.payload) return;
+        const p = ev.payload;
+        setStreamLogLines((prev) => {
+          if (p.kind === 'log' && p.message) {
+            return [...prev, { id: `a-${Date.now()}-${prev.length}`, text: p.message }];
+          }
+          return prev;
+        });
+      });
+      const ms = Math.round(performance.now() - t0);
+      setGenerationResult(result);
+      setGenerationPhase('complete');
+      const hasErr = Boolean(result?.excel_error);
+      const msg = result?.excel_error
+        ? `Auction error: ${result.excel_error}`
+        : result?.excel?.message || 'Auction Insights finished.';
+      void postAutomationLog({
+        status: hasErr ? 'warning' : 'success',
+        client_key: selectedClient,
+        client_name: clientName,
+        message: msg,
+        duration_ms: ms,
+      }).catch(() => {});
+    } catch (e) {
+      const ms = Math.round(performance.now() - t0);
+      setGenerationError(e?.message || 'Request failed');
+      setGenerationPhase('error');
+      void postAutomationLog({
+        status: 'error',
+        client_key: selectedClient,
+        client_name: clientName,
+        message: e?.message || 'Auction Insights request failed',
+        duration_ms: ms,
+      }).catch(() => {});
+    } finally {
+      setAuctionLoading(false);
+    }
+  };
+
+  const startBothGeneration = async () => {
+    if (!selectedClient || !selectedMeta?.has_config || isGenerating || auctionLoading) return;
+
+    setGenerationPhase('running');
+    setGenerationResult(null);
+    setGenerationError(null);
+    setStreamLogLines([]);
+    setElapsedMs(0);
+    setAuctionLoading(true);
+    const t0 = performance.now();
+
+    const customerId = selectedMeta?.customer_id || selectedClient;
+    const parsed = new Date(`${reportEndDate}T00:00:00`);
+    const monthLabel = Number.isNaN(parsed.getTime())
+      ? reportEndDate
+      : parsed.toLocaleString('en-US', { month: 'long', year: 'numeric' });
+
+    const combined = {};
+    let pptFailed = false;
+
+    try {
+      const pptBody = {
+        client_id: selectedClient,
+        start_date: reportStartDate,
+        end_date: reportEndDate,
+        generate_ppt: true,
+      };
+      const pptResult = await postGenerateStream(pptBody, (ev) => {
+        if (ev.event !== 'progress' || !ev.payload) return;
+        const p = ev.payload;
+        setStreamLogLines((prev) => {
+          if (p.kind === 'download') {
+            const msg = p.message ?? `Downloading... ${p.percent ?? 0}%`;
+            const last = prev[prev.length - 1];
+            if (last?.isDownload) {
+              return [
+                ...prev.slice(0, -1),
+                { ...last, text: msg, downloadPercent: p.percent ?? last.downloadPercent },
+              ];
+            }
+            return [
+              ...prev,
+              { id: `dl-${Date.now()}`, text: msg, downloadPercent: p.percent, isDownload: true },
+            ];
+          }
+          if (p.kind === 'log' && p.message) {
+            return [...prev, { id: `l-${Date.now()}-${prev.length}`, text: p.message }];
+          }
+          return prev;
+        });
+      });
+      Object.assign(combined, pptResult);
+    } catch (e) {
+      pptFailed = true;
+      combined.ppt_error = e?.message || 'PPT request failed';
+      setStreamLogLines((prev) => [
+        ...prev,
+        { id: `pe-${Date.now()}`, text: `ERROR (PowerPoint): ${combined.ppt_error}` },
+      ]);
+    }
+
+    setStreamLogLines((prev) => [
+      ...prev,
+      { id: `sep-${Date.now()}`, text: '— Starting Auction Insights step —' },
+    ]);
+
+    try {
+      const auctionBody = {
+        customer_id: String(customerId),
+        month_label: monthLabel,
+        start_date: reportStartDate,
+        end_date: reportEndDate,
+      };
+      const auctionResult = await postGenerateAuctionInsightsStream(auctionBody, (ev) => {
+        if (ev.event !== 'progress' || !ev.payload) return;
+        const p = ev.payload;
+        if (p.kind === 'log' && p.message) {
+          setStreamLogLines((prev) => [
+            ...prev,
+            { id: `a-${Date.now()}-${prev.length}`, text: p.message },
+          ]);
+        }
+      });
+      if (auctionResult?.excel) combined.excel = auctionResult.excel;
+      if (auctionResult?.excel_error) combined.excel_error = auctionResult.excel_error;
+    } catch (e) {
+      combined.excel_error = e?.message || 'Auction Insights request failed';
+      setStreamLogLines((prev) => [
+        ...prev,
+        { id: `ae-${Date.now()}`, text: `ERROR (Auction Insights): ${combined.excel_error}` },
+      ]);
+    }
+
+    const ms = Math.round(performance.now() - t0);
+    setGenerationResult(combined);
+
+    if (pptFailed && combined.excel_error) {
+      setGenerationError(`PPT: ${combined.ppt_error}; Auction: ${combined.excel_error}`);
+      setGenerationPhase('error');
+    } else {
+      setGenerationPhase('complete');
+    }
+
+    const parts = [];
+    parts.push(
+      combined.ppt_error
+        ? `PPT error: ${combined.ppt_error}`
+        : combined.ppt
+          ? 'PPT uploaded.'
+          : 'PPT not returned.',
+    );
+    parts.push(
+      combined.excel_error
+        ? `Auction error: ${combined.excel_error}`
+        : combined.excel?.message || 'Auction Insights finished.',
+    );
+    const hasErr = Boolean(combined.ppt_error || combined.excel_error);
+    void postAutomationLog({
+      status: hasErr ? 'warning' : 'success',
+      client_key: selectedClient,
+      client_name: clientName,
+      message: parts.join(' '),
+      duration_ms: ms,
+    }).catch(() => {});
+
+    setAuctionLoading(false);
+  };
+
   const startGeneration = async () => {
     if (!selectedClient) return;
     if (!selectedMeta?.has_config) return;
@@ -482,8 +700,7 @@ export function ReportGeneratorView() {
       client_id: selectedClient,
       start_date: reportStartDate,
       end_date: reportEndDate,
-      generate_ppt: exportMode === 'ppt' || exportMode === 'both',
-      generate_excel: exportMode === 'excel' || exportMode === 'both',
+      generate_ppt: true,
     };
 
     try {
@@ -528,13 +745,7 @@ export function ReportGeneratorView() {
       if (body.generate_ppt) {
         parts.push(result.ppt_error ? `PPT error: ${result.ppt_error}` : result.ppt ? 'PPT uploaded.' : 'PPT not returned.');
       }
-      if (body.generate_excel) {
-        parts.push(
-          result.excel_error ? `Excel error: ${result.excel_error}` : result.excel?.message || 'Excel step finished.',
-        );
-      }
-
-      const hasErr = Boolean(result.ppt_error || result.excel_error);
+      const hasErr = Boolean(result.ppt_error);
       void postAutomationLog({
         status: hasErr ? 'warning' : 'success',
         client_key: selectedClient,
@@ -565,7 +776,7 @@ export function ReportGeneratorView() {
   };
 
   const isGenerating = generationPhase === 'running';
-  const canGenerate = Boolean(selectedClient && selectedMeta?.has_config && !isGenerating);
+  const canGenerate = Boolean(selectedClient && selectedMeta?.has_config && !isGenerating && !auctionLoading);
 
   useEffect(() => {
     if (isGenerating) setClientDropdownOpen(false);
@@ -787,53 +998,44 @@ export function ReportGeneratorView() {
 
           <div>
             <h2 className="mb-4 text-xs font-semibold uppercase tracking-wider text-on-surface-variant">Export format</h2>
-
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <button
                 type="button"
                 onClick={() => setExportMode('ppt')}
-                disabled={isGenerating}
+                disabled={isGenerating || auctionLoading}
                 className={[
-                  'flex w-full items-center gap-4 rounded-xl px-4 py-4 text-left transition-colors disabled:pointer-events-none disabled:opacity-50',
+                  'rounded-xl px-4 py-4 text-left transition-colors disabled:pointer-events-none disabled:opacity-50',
                   exportMode === 'ppt'
                     ? 'bg-[color:rgba(12,68,124,0.08)] ring-2 ring-primary/20'
                     : 'bg-surface-container-high hover:bg-surface-container-low',
                 ].join(' ')}
               >
-                <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-orange-500/12 text-orange-600">
-                  <svg className="h-6 w-6" fill="currentColor" viewBox="0 0 24 24" aria-hidden>
-                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm4 18H6V4h7v5h5v11z" />
-                  </svg>
-                </span>
-                <span className="font-semibold text-on-surface">PPT only</span>
+                <p className="text-sm font-semibold text-on-surface">PPT</p>
+                <p className="mt-1 text-xs text-on-surface-variant">Generate PowerPoint report.</p>
               </button>
-
               <button
                 type="button"
-                onClick={() => setExportMode('excel')}
-                disabled={isGenerating}
+                onClick={() => setExportMode('auction')}
+                disabled={isGenerating || auctionLoading}
                 className={[
-                  'flex w-full items-center gap-4 rounded-xl px-4 py-4 text-left transition-colors disabled:pointer-events-none disabled:opacity-50',
-                  exportMode === 'excel'
+                  'rounded-xl px-4 py-4 text-left transition-colors disabled:pointer-events-none disabled:opacity-50',
+                  exportMode === 'auction'
                     ? 'bg-[color:rgba(12,68,124,0.08)] ring-2 ring-primary/20'
                     : 'bg-surface-container-high hover:bg-surface-container-low',
                 ].join(' ')}
               >
-                <span className="flex h-11 w-11 items-center justify-center rounded-lg bg-secondary/15 text-secondary">
-                  <svg className="h-6 w-6" fill="currentColor" viewBox="0 0 24 24" aria-hidden>
-                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 2l5 5h-5V4zM8 12h8v2H8v-2zm0 4h8v2H8v-2z" />
-                  </svg>
-                </span>
-                <span className="font-semibold text-on-surface">Excel only</span>
+                <p className="text-sm font-semibold text-on-surface">Auction Insights</p>
+                <p className="mt-1 text-xs text-on-surface-variant">Generate Auction Insights Excel report.</p>
               </button>
-
               <button
                 type="button"
                 onClick={() => setExportMode('both')}
-                disabled={isGenerating}
+                disabled={isGenerating || auctionLoading}
                 className={[
-                  'relative flex w-full items-center gap-4 rounded-xl px-4 py-4 text-left text-on-primary transition-[filter] disabled:pointer-events-none disabled:opacity-50',
-                  exportMode === 'both' ? '' : 'bg-surface-container-high hover:bg-surface-container-low text-on-surface',
+                  'relative rounded-xl px-4 py-4 text-left transition-[filter,colors] disabled:pointer-events-none disabled:opacity-50',
+                  exportMode === 'both'
+                    ? 'text-on-primary shadow-ambient hover:brightness-105'
+                    : 'bg-surface-container-high text-on-surface hover:bg-surface-container-low',
                 ].join(' ')}
                 style={
                   exportMode === 'both'
@@ -841,22 +1043,18 @@ export function ReportGeneratorView() {
                     : undefined
                 }
               >
-                {exportMode === 'both' && (
-                  <span className="absolute right-4 top-4 rounded-md bg-on-primary/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-on-primary">
-                    Recommended
-                  </span>
-                )}
-                <span
+                <span className="absolute right-3 top-3 rounded-md bg-on-primary/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-on-primary">
+                  Recommended
+                </span>
+                <p className="text-sm font-semibold">Both</p>
+                <p
                   className={[
-                    'flex h-11 w-11 items-center justify-center rounded-lg',
-                    exportMode === 'both' ? 'bg-on-primary/20 text-on-primary' : 'bg-primary/10 text-primary-container',
+                    'mt-1 text-xs',
+                    exportMode === 'both' ? 'text-on-primary/80' : 'text-on-surface-variant',
                   ].join(' ')}
                 >
-                  <svg className="h-6 w-6" fill="currentColor" viewBox="0 0 24 24" aria-hidden>
-                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm-1 2l5 5h-5V4z" />
-                  </svg>
-                </span>
-                <span className="font-semibold">Both formats</span>
+                  Generate PowerPoint + Auction Insights together.
+                </p>
               </button>
             </div>
           </div>
@@ -865,12 +1063,24 @@ export function ReportGeneratorView() {
         <div className="mt-10 flex justify-end border-t border-[rgba(194,198,209,0.15)] pt-8">
           <button
             type="button"
-            onClick={startGeneration}
+            onClick={
+              exportMode === 'both'
+                ? startBothGeneration
+                : exportMode === 'auction'
+                  ? startAuctionInsights
+                  : startGeneration
+            }
             disabled={!canGenerate}
             className="rounded-xl px-8 py-3 text-sm font-semibold text-on-primary shadow-ambient transition-[filter,transform] hover:brightness-105 active:scale-[0.99] disabled:pointer-events-none disabled:opacity-60"
             style={{ background: 'linear-gradient(135deg, #002E59 0%, #0C447C 100%)' }}
           >
-            {isGenerating ? 'Generating…' : 'Generate report'}
+            {isGenerating || auctionLoading
+              ? 'Generating…'
+              : exportMode === 'both'
+                ? 'Generate both'
+                : exportMode === 'auction'
+                  ? 'Generate auction insights'
+                  : 'Generate report'}
           </button>
         </div>
       </div>

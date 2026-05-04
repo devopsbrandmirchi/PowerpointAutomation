@@ -18,7 +18,7 @@ export async function fetchClients() {
 }
 
 /**
- * @param {{ client_id: string, start_date: string, end_date: string, generate_ppt: boolean, generate_excel: boolean }} body
+ * @param {{ client_id: string, start_date: string, end_date: string, generate_ppt: boolean }} body
  */
 export async function postGenerate(body) {
   const res = await fetch(`${getApiBase()}/generate`, {
@@ -97,6 +97,90 @@ export async function postGenerateStream(body, onProgress) {
       }
       if (ev.event === 'error') {
         throw new Error(ev.detail || 'Generate stream error');
+      }
+    }
+  }
+
+  if (finalData == null) throw new Error('Stream ended without a result');
+  return finalData;
+}
+
+/**
+ * Triggers Auction Insights generation from backend (sync fallback).
+ * @param {{ customer_id: string, month_label: string, start_date?: string, end_date?: string }} payload
+ */
+export async function postGenerateAuctionInsights(payload) {
+  const res = await fetch(`${getApiBase()}/api/reports/generate-auction-insights`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = typeof data?.detail === 'string' ? data.detail : res.statusText;
+    throw new Error(detail || `Auction insights failed (${res.status})`);
+  }
+  return data;
+}
+
+/**
+ * Streamed Auction Insights generation. Emits log lines via onProgress and resolves with final result.
+ * Result shape mirrors PPT pipeline: { excel: { filename, drive_url, message } } or { excel_error }.
+ * @param {{ customer_id: string, month_label: string, start_date?: string, end_date?: string }} body
+ * @param {(ev: { event: string, payload?: Record<string, unknown>, data?: unknown, detail?: string }) => void} onProgress
+ */
+export async function postGenerateAuctionInsightsStream(body, onProgress) {
+  const res = await fetch(`${getApiBase()}/api/reports/generate-auction-insights-stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    let detail = errText;
+    try {
+      const j = JSON.parse(errText);
+      detail = typeof j?.detail === 'string' ? j.detail : errText;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail || `Auction insights stream failed (${res.status})`);
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error('No response body');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalData = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const chunks = buffer.split('\n\n');
+    buffer = chunks.pop() || '';
+    for (const block of chunks) {
+      const line = block.trim();
+      if (!line.startsWith('data:')) continue;
+      const jsonStr = line.replace(/^data:\s?/, '');
+      let ev;
+      try {
+        ev = JSON.parse(jsonStr);
+      } catch {
+        continue;
+      }
+      if (ev.event === 'progress' && onProgress) onProgress(ev);
+      if (ev.event === 'result') {
+        finalData = ev.data;
+        if (onProgress) onProgress(ev);
+      }
+      if (ev.event === 'error') {
+        throw new Error(ev.detail || 'Auction insights stream error');
       }
     }
   }

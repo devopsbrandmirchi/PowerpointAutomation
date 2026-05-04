@@ -2,13 +2,42 @@ from supabase import create_client
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 # GA4 Client
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import DateRange, Dimension, Metric, RunReportRequest
 
-load_dotenv()
+_BACKEND_DIR = Path(__file__).resolve().parent
+load_dotenv(_BACKEND_DIR / ".env")
+
+
+def _resolve_ga4_credentials_path() -> Path:
+    """Resolve GA4 service account JSON. Handles Docker-style paths and broken absolutes like /Backend/...."""
+    raw = (os.environ.get("GA4_CREDENTIALS") or "").strip()
+    candidates: list[Path] = []
+    if raw:
+        p = Path(raw)
+        if p.is_absolute():
+            candidates.append(p)
+            if not p.is_file():
+                candidates.append(_BACKEND_DIR / p.name)
+        else:
+            candidates.append(_BACKEND_DIR / p)
+    candidates.append(_BACKEND_DIR / "ga4-credentials.json")
+    for c in candidates:
+        try:
+            rp = c.resolve()
+        except OSError:
+            continue
+        if rp.is_file():
+            return rp
+    raise RuntimeError(
+        "GA4 service account JSON not found. Set GA4_CREDENTIALS to the real path of your JSON key, "
+        f"or place ga4-credentials.json in {_BACKEND_DIR}"
+    )
+
 
 # Setup Supabase
 sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
@@ -16,12 +45,9 @@ sb = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
 # Account row table
 CLIENT_ACCOUNT_TABLE = os.environ.get("SUPABASE_CLIENT_TABLE", "google_ads_accounts")
 
-# Setup GA4 Authentication (strictly from GA4_CREDENTIALS)
-ga4_credentials_path = os.environ.get("GA4_CREDENTIALS")
-if not ga4_credentials_path:
-    raise RuntimeError("GA4_CREDENTIALS env var is required but not set.")
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = ga4_credentials_path
-ga4_client = BetaAnalyticsDataClient()
+_ga4_creds_path = _resolve_ga4_credentials_path()
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(_ga4_creds_path)
+ga4_client = BetaAnalyticsDataClient.from_service_account_file(str(_ga4_creds_path))
 
 # --- UTILITIES ---
 def format_duration(seconds):

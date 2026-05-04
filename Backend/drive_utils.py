@@ -2,15 +2,46 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google.oauth2 import service_account
 import os
+from pathlib import Path
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
+
+_BACKEND_DIR = Path(__file__).resolve().parent
+
+
+def _resolve_service_account_json() -> str:
+    """Same JSON as GA4; path relative to Backend/ so cwd does not matter."""
+    raw = (
+        (os.environ.get("GOOGLE_CREDENTIALS_FILE") or "").strip()
+        or (os.environ.get("GA4_CREDENTIALS") or "").strip()
+        or "ga4-credentials.json"
+    )
+    p = Path(raw)
+    candidates: list[Path] = []
+    if p.is_absolute():
+        candidates.append(p)
+        if not p.is_file():
+            candidates.append(_BACKEND_DIR / p.name)
+    else:
+        candidates.append(_BACKEND_DIR / p)
+    candidates.append(_BACKEND_DIR / "ga4-credentials.json")
+    for c in candidates:
+        try:
+            rp = c.resolve()
+        except OSError:
+            continue
+        if rp.is_file():
+            return str(rp)
+    raise FileNotFoundError(
+        f"Service account JSON not found (checked GOOGLE_CREDENTIALS_FILE, GA4_CREDENTIALS, {_BACKEND_DIR / 'ga4-credentials.json'})"
+    )
 
 
 def get_drive_service():
     """Create and return an authenticated Google Drive service client."""
     creds = service_account.Credentials.from_service_account_file(
-        os.environ.get('GOOGLE_CREDENTIALS_FILE', 'ga4-credentials.json'), # Make sure this matches your JSON file name!
-        scopes=SCOPES
+        _resolve_service_account_json(),
+        scopes=SCOPES,
     )
     return build('drive', 'v3', credentials=creds)
 

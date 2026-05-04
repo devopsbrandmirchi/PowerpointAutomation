@@ -14,13 +14,9 @@ export function buildGeneratedFiles(clientId, exportMode) {
   const slug = fileSlugFromClientId(clientId);
   const my = monthYearForFilename();
   const pptName = `${slug}_${my}_filled.pptx`;
-  const xlsxName = `${slug}_Auction_Insights.xlsx`;
   const files = [];
   if (exportMode === 'ppt' || exportMode === 'both') {
     files.push({ name: pptName, kind: 'pptx', label: 'PowerPoint deck' });
-  }
-  if (exportMode === 'excel' || exportMode === 'both') {
-    files.push({ name: xlsxName, kind: 'xlsx', label: 'Auction Insights Excel' });
   }
   return files;
 }
