@@ -4,6 +4,10 @@
     {
       "source": "/api/:match*",
       "destination": "http://pptx.wheeleradconnect.com/:match*"
+    },
+    {
+      "source": "/:path*",
+      "destination": "/index.html"
     }
   ]
 }
