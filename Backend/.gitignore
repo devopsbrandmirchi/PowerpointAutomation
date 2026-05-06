@@ -36,12 +36,7 @@ ENV/
 !.env.example
 *.pem
 *.key
-secrets/
-credentials.json
-oauth_credentials.json
-ga4-credentials.json
-google-ads.yaml
-*-credentials.json
+
 
 # --- Test / coverage ---
 .pytest_cache/
