@@ -28,6 +28,7 @@ AUCTION_INSIGHTS_DRIVE_FOLDER_ID = os.environ.get(
     "AUCTION_INSIGHTS_DRIVE_FOLDER_ID",
     "1pR1oWgzhA51YZm1c9MnZt3LULHLp_gAJ",
 )
+AUCTION_INSIGHTS_DRIVE_FOLDER_URL = f"https://drive.google.com/drive/folders/{AUCTION_INSIGHTS_DRIVE_FOLDER_ID}"
 
 
 def _parse_cors_origins(raw: Optional[str]) -> list[str]:
@@ -337,10 +338,11 @@ def _auction_insights_worker(body: "AuctionInsightsRequest", out_q: queue.Queue)
         result["excel"] = {
             "filename": os.path.basename(str(local_file)),
             "drive_url": drive_url,
+            "folder_url": AUCTION_INSIGHTS_DRIVE_FOLDER_URL,
             "message": (
                 "Auction Insights uploaded to Google Drive."
                 if drive_url
-                else "Auction Insights generated but Drive upload failed."
+                else f"Auction Insights generated. Open folder: {AUCTION_INSIGHTS_DRIVE_FOLDER_URL}"
             ),
         }
         forward("=== RESULT ===")
@@ -473,6 +475,7 @@ def generate_auction_insights_report(body: AuctionInsightsRequest):
         "status": "success" if excel.get("drive_url") else "partial",
         "filename": excel.get("filename"),
         "drive_url": excel.get("drive_url"),
+        "folder_url": excel.get("folder_url"),
         "message": excel.get("message")
         or final_result.get("excel_error")
         or "Auction Insights run finished.",

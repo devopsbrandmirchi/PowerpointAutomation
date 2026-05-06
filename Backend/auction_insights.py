@@ -61,11 +61,18 @@ def upload_excel_to_drive(local_filename: str, drive_folder_id: str):
             uploaded_file = drive.files().create(
                 body=file_metadata,
                 media_body=media,
-                fields='id, webViewLink',
+                fields='id,webViewLink,webContentLink,name',
                 supportsAllDrives=True
             ).execute()
 
-        file_link = uploaded_file.get('webViewLink')
+        file_id = uploaded_file.get('id')
+        file_link = uploaded_file.get('webViewLink') or uploaded_file.get('webContentLink')
+        if not file_link and file_id:
+            # Server/shared-drive responses may omit webViewLink; build deterministic URL.
+            file_link = f"https://drive.google.com/file/d/{file_id}/view"
+
+        if file_id:
+            print(f"Uploaded file ID: {file_id}")
         print(f"✅ Successfully uploaded! View it here: {file_link}")
 
         if os.path.exists(local_filename):
