@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import DateRange, Dimension, Metric, RunReportRequest
 from supabase import Client, create_client
+from google_credentials import resolve_google_credentials_path
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -19,50 +20,7 @@ METRICS_TABLE = "ga4_metrics"
 
 
 def _resolve_ga4_credentials_file() -> str:
-    """
-    Resolve GA4 service-account JSON from env or common local/container paths.
-    """
-    env_path = (
-        (os.environ.get("GOOGLE_CREDENTIALS_FILE") or "").strip()
-        or (os.environ.get("GA4_CREDENTIALS") or "").strip()
-        or "ga4-credentials.json"
-    )
-    p = Path(env_path)
-
-    candidates: list[Path] = []
-    if p.is_absolute():
-        candidates.append(p)
-        if not p.is_file():
-            candidates.append(BASE_DIR / p.name)
-    else:
-        candidates.append(BASE_DIR / p)
-
-    # Common filenames/locations used in this project.
-    candidates.extend(
-        [
-            BASE_DIR / "ga4-credentials.json",
-            BASE_DIR / "credentials.json",
-            Path("/app/ga4-credentials.json"),
-            Path("/app/credentials.json"),
-            Path("/app/secrets/ga4-credentials.json"),
-            Path("/app/secrets/credentials.json"),
-        ]
-    )
-
-    checked: list[str] = []
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except OSError:
-            continue
-        checked.append(str(resolved))
-        if resolved.is_file():
-            return str(resolved)
-
-    raise FileNotFoundError(
-        "Missing GA4 credentials JSON. Checked: "
-        + ", ".join(checked)
-    )
+    return resolve_google_credentials_path(BASE_DIR)
 
 # --- EXACT BUTTON LIST (must match events in GA4 UI) ---
 BUTTON_EVENT_NAMES = [

@@ -3,6 +3,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from google.oauth2 import service_account
 import os
 from pathlib import Path
+from google_credentials import resolve_google_credentials_path
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
@@ -11,41 +12,7 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 
 def _resolve_service_account_json() -> str:
     """Same JSON as GA4; path relative to Backend/ so cwd does not matter."""
-    raw = (
-        (os.environ.get("GOOGLE_CREDENTIALS_FILE") or "").strip()
-        or (os.environ.get("GA4_CREDENTIALS") or "").strip()
-        or "ga4-credentials.json"
-    )
-    p = Path(raw)
-    candidates: list[Path] = []
-    if p.is_absolute():
-        candidates.append(p)
-        if not p.is_file():
-            candidates.append(_BACKEND_DIR / p.name)
-    else:
-        candidates.append(_BACKEND_DIR / p)
-    candidates.extend(
-        [
-            _BACKEND_DIR / "ga4-credentials.json",
-            _BACKEND_DIR / "credentials.json",
-            Path("/app/ga4-credentials.json"),
-            Path("/app/credentials.json"),
-            Path("/app/secrets/ga4-credentials.json"),
-            Path("/app/secrets/credentials.json"),
-        ]
-    )
-    checked: list[str] = []
-    for c in candidates:
-        try:
-            rp = c.resolve()
-        except OSError:
-            continue
-        checked.append(str(rp))
-        if rp.is_file():
-            return str(rp)
-    raise FileNotFoundError(
-        "Service account JSON not found. Checked: " + ", ".join(checked)
-    )
+    return resolve_google_credentials_path(_BACKEND_DIR)
 
 
 def get_drive_service():

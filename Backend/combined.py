@@ -4,6 +4,7 @@ from dateutil.relativedelta import relativedelta
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from google_credentials import resolve_google_credentials_path
 
 # GA4 Client
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
@@ -14,41 +15,8 @@ load_dotenv(_BACKEND_DIR / ".env")
 
 
 def _resolve_ga4_credentials_path() -> Path:
-    """Resolve GA4 service account JSON. Handles Docker-style paths and broken absolutes like /Backend/...."""
-    raw = (
-        (os.environ.get("GOOGLE_CREDENTIALS_FILE") or "").strip()
-        or (os.environ.get("GA4_CREDENTIALS") or "").strip()
-    )
-    candidates: list[Path] = []
-    if raw:
-        p = Path(raw)
-        if p.is_absolute():
-            candidates.append(p)
-            if not p.is_file():
-                candidates.append(_BACKEND_DIR / p.name)
-        else:
-            candidates.append(_BACKEND_DIR / p)
-    candidates.extend(
-        [
-            _BACKEND_DIR / "ga4-credentials.json",
-            _BACKEND_DIR / "credentials.json",
-            Path("/app/ga4-credentials.json"),
-            Path("/app/credentials.json"),
-            Path("/app/secrets/ga4-credentials.json"),
-            Path("/app/secrets/credentials.json"),
-        ]
-    )
-    for c in candidates:
-        try:
-            rp = c.resolve()
-        except OSError:
-            continue
-        if rp.is_file():
-            return rp
-    raise RuntimeError(
-        "GA4 service account JSON not found. Set GA4_CREDENTIALS to the real path of your JSON key, "
-        f"or place ga4-credentials.json in {_BACKEND_DIR}"
-    )
+    """Resolve GA4 service account JSON for local and container runtime."""
+    return Path(resolve_google_credentials_path(_BACKEND_DIR))
 
 
 # Setup Supabase
