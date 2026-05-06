@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaFileUpload
 from drive_utils import get_drive_service
 
 # ==========================================
@@ -52,18 +52,17 @@ def upload_excel_to_drive(local_filename: str, drive_folder_id: str):
             'parents': [drive_folder_id]
         }
 
-        with open(local_filename, 'rb') as f:
-            media = MediaIoBaseUpload(
-                f,
-                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                resumable=True
-            )
-            uploaded_file = drive.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id,webViewLink,webContentLink,name',
-                supportsAllDrives=True
-            ).execute()
+        media = MediaFileUpload(
+            local_filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            resumable=False,
+        )
+        uploaded_file = drive.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id,webViewLink,webContentLink,name,parents',
+            supportsAllDrives=True
+        ).execute()
 
         file_id = uploaded_file.get('id')
         file_link = uploaded_file.get('webViewLink') or uploaded_file.get('webContentLink')
@@ -72,6 +71,15 @@ def upload_excel_to_drive(local_filename: str, drive_folder_id: str):
             file_link = f"https://drive.google.com/file/d/{file_id}/view"
 
         if file_id:
+            verify = drive.files().get(
+                fileId=file_id,
+                fields='id,parents,webViewLink,webContentLink',
+                supportsAllDrives=True
+            ).execute()
+            parents = verify.get('parents') or []
+            if drive_folder_id not in parents:
+                print(f"⚠️ Uploaded file parent mismatch. Expected {drive_folder_id}, got {parents}")
+            file_link = verify.get('webViewLink') or verify.get('webContentLink') or file_link
             print(f"Uploaded file ID: {file_id}")
         print(f"✅ Successfully uploaded! View it here: {file_link}")
 

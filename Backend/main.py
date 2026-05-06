@@ -360,6 +360,10 @@ def _auction_insights_worker(body: "AuctionInsightsRequest", out_q: queue.Queue)
             forward(f"Uploaded successfully. URL: {drive_url}")
         else:
             forward("ERROR: Drive upload did not return a link.")
+            result["excel_error"] = (
+                "Excel was generated locally but Drive upload failed. "
+                "Please check service-account access to the target folder."
+            )
 
         result["excel"] = {
             "filename": os.path.basename(str(local_file)),
@@ -368,7 +372,7 @@ def _auction_insights_worker(body: "AuctionInsightsRequest", out_q: queue.Queue)
             "message": (
                 "Auction Insights uploaded to Google Drive."
                 if drive_url
-                else f"Auction Insights generated. Open folder: {AUCTION_INSIGHTS_DRIVE_FOLDER_URL}"
+                else "Auction Insights file was not uploaded to Drive."
             ),
         }
         forward("=== RESULT ===")
