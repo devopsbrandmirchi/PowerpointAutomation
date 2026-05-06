@@ -32,6 +32,9 @@ ENV/
 
 # --- Env & secrets (never commit) ---
 secrets/
+credentials.json
+ga4-credentials.json
+google-ads.yaml
 .env
 .env.*
 !.env.example
