@@ -1,11 +1,10 @@
 /**
- * Base URL for the FastAPI backend (no trailing slash).
- * Set VITE_API_URL in .env.development / .env.production, e.g. http://127.0.0.1:8000
+ * Base URL for the FastAPI backend.
+ * By returning a relative path ('/api'), the browser treats the request as secure.
+ * Vercel will then intercept this and secretly proxy it to your insecure DigitalOcean HTTP server.
  */
 export function getApiBase() {
-  const raw = import.meta.env.VITE_API_URL;
-  if (raw && String(raw).trim()) return String(raw).replace(/\/$/, '');
-  return 'http://pptx.wheeleradconnect.com';
+  return '/api';
 }
 
 export async function fetchClients() {
