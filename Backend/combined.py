@@ -2,6 +2,7 @@ from supabase import create_client
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 from google_credentials import resolve_google_credentials_path
@@ -80,10 +81,12 @@ def fetch_supabase_paginated(table_name, customer_id, start_date, end_date, colu
     offset = 0
     limit_size = 1000
     
+    normalized_customer_id = re.sub(r"\D", "", str(customer_id or ""))
+
     while True:
         response = sb.table(table_name) \
             .select(columns) \
-            .eq('customer_id', customer_id) \
+            .eq('customer_id', normalized_customer_id) \
             .gte('date', start_date) \
             .lte('date', end_date) \
             .range(offset, offset + limit_size - 1) \
@@ -137,6 +140,7 @@ def aggregate_ads(rows):
     }
     
 def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
+    normalized_customer_id = re.sub(r"\D", "", str(customer_id or ""))
     empty_data = {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0}
     result = {
         'ga4_paid': empty_data.copy(), 
@@ -148,10 +152,10 @@ def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
     property_id = (str(ga4_property_id).strip() if ga4_property_id else "") or None
     if not property_id:
         account_res = (
-            sb.table(CLIENT_ACCOUNT_TABLE).select("ga4_property_id").eq("customer_id", customer_id).execute()
+            sb.table(CLIENT_ACCOUNT_TABLE).select("ga4_property_id").eq("customer_id", normalized_customer_id).execute()
         )
         if not account_res.data or not account_res.data[0].get("ga4_property_id"):
-            print(f"Warning: No GA4 Property ID found in database for client {customer_id}.")
+            print(f"Warning: No GA4 Property ID found in database for client {normalized_customer_id}.")
             return result
         property_id = str(account_res.data[0]["ga4_property_id"]).strip()
 

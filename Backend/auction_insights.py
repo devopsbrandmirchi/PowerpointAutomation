@@ -1,4 +1,5 @@
 import os
+import re
 from dotenv import load_dotenv
 from supabase import create_client
 from collections import defaultdict
@@ -21,6 +22,11 @@ def get_supabase():
     if not url or not key:
         raise ValueError("Missing Supabase URL or Key in .env file.")
     return create_client(url, key)
+
+
+def normalize_customer_id(customer_id: str) -> str:
+    """Normalize customer IDs like 123-456-7890 -> 1234567890."""
+    return re.sub(r"\D", "", str(customer_id or ""))
 
 
 # ==========================================
@@ -83,6 +89,7 @@ def month_text_to_date_range(month_text: str):
 # 3. GET LATEST REPORT DATE FOR CUSTOMER
 # ==========================================
 def get_latest_report_date(customer_id: str):
+    customer_id = normalize_customer_id(customer_id)
     sb = get_supabase()
     response = sb.table("google_ads_auction_master") \
                  .select("report_date") \
@@ -107,6 +114,7 @@ def get_auction_insights_data(
     start_date: str = None,
     end_date: str = None,
 ):
+    customer_id = normalize_customer_id(customer_id)
     sb = get_supabase()
 
     if start_date and end_date:
@@ -238,6 +246,7 @@ def generate_auction_xlsx(
     start_date: str = None,
     end_date: str = None,
 ):
+    customer_id = normalize_customer_id(customer_id)
     data = get_auction_insights_data(
         customer_id,
         report_month=report_month,
