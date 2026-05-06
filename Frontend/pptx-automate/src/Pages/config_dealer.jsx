@@ -73,6 +73,19 @@ function rowMatchesSearch(row, q) {
   return hay.includes(q);
 }
 
+function detectGa4ServiceDisabled(logs) {
+  const text = Array.isArray(logs) ? logs.join('\n') : '';
+  if (!text || !/SERVICE_DISABLED|analyticsdata\.googleapis\.com/i.test(text)) {
+    return null;
+  }
+  const urlMatch = text.match(/https:\/\/console\.developers\.google\.com\/apis\/api\/analyticsdata\.googleapis\.com\/overview\?project=\d+/i);
+  const projectMatch = text.match(/project[s]?\/?(\d{6,})/i) || text.match(/project\s+(\d{6,})/i);
+  return {
+    activationUrl: urlMatch ? urlMatch[0] : null,
+    projectId: projectMatch ? projectMatch[1] : null,
+  };
+}
+
 export default function ConfigDealer() {
   const { clientBelongsToActiveAgency, registerClientIds, activeAgency } = useAgency();
   const [rows, setRows] = useState([]);
@@ -336,6 +349,7 @@ export default function ConfigDealer() {
             ? '0 0 0 2px rgba(220, 38, 38, 0.35)'
             : 'none';
     const label = st === 'syncing' ? 'Syncing…' : st === 'success' ? 'OK' : st === 'error' ? 'Failed' : 'Idle';
+    const serviceDisabled = detectGa4ServiceDisabled(logs);
 
     return (
       <div className="min-w-0 flex-1 space-y-2">
@@ -366,6 +380,30 @@ export default function ConfigDealer() {
         </div>
         {st === 'success' && dealerGa4OutcomeOk(pack.summary) ? (
           <p className="text-[11px] font-medium text-emerald-800/95">GA4 data refreshed for this dealer.</p>
+        ) : null}
+        {serviceDisabled ? (
+          <div className="rounded-lg border border-amber-200/90 bg-amber-50/95 px-3 py-2 text-[11px] text-amber-950">
+            <p className="font-semibold">Google Analytics Data API is disabled for this service account project.</p>
+            <p className="mt-1">
+              Enable <code className="rounded bg-amber-100/80 px-1">analyticsdata.googleapis.com</code>
+              {serviceDisabled.projectId ? (
+                <>
+                  {' '}for project <strong>{serviceDisabled.projectId}</strong>
+                </>
+              ) : null}
+              , then retry sync in 1-2 minutes.
+            </p>
+            {serviceDisabled.activationUrl ? (
+              <a
+                href={serviceDisabled.activationUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-1 inline-block font-semibold text-primary underline decoration-primary/60 underline-offset-2"
+              >
+                Open API activation page
+              </a>
+            ) : null}
+          </div>
         ) : null}
         <div className="overflow-hidden rounded-lg border border-[rgba(194,198,209,0.2)] bg-surface-container-high/40">
           <button
