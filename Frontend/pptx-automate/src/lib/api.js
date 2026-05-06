@@ -5,7 +5,7 @@
 export function getApiBase() {
   const raw = import.meta.env.VITE_API_URL;
   if (raw && String(raw).trim()) return String(raw).replace(/\/$/, '');
-  return 'http://127.0.0.1:8000';
+  return 'http://pptx.wheeleradconnect.com';
 }
 
 export async function fetchClients() {
