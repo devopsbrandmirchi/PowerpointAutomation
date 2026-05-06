@@ -2,7 +2,6 @@ from supabase import create_client
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import os
-import re
 from pathlib import Path
 from dotenv import load_dotenv
 from google_credentials import resolve_google_credentials_path
@@ -29,6 +28,22 @@ CLIENT_ACCOUNT_TABLE = os.environ.get("SUPABASE_CLIENT_TABLE", "google_ads_accou
 _ga4_creds_path = _resolve_ga4_credentials_path()
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(_ga4_creds_path)
 ga4_client = BetaAnalyticsDataClient.from_service_account_file(str(_ga4_creds_path))
+
+
+def _normalize_customer_id(value) -> str:
+    raw = str(value or "").strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    return digits or raw
+
+
+def _normalize_ga4_property_id(value) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    # Handle values like "123456789.0" coming from numeric DB columns.
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+    return "".join(ch for ch in raw if ch.isdigit())
 
 # --- UTILITIES ---
 def format_duration(seconds):
@@ -81,18 +96,26 @@ def fetch_supabase_paginated(table_name, customer_id, start_date, end_date, colu
     offset = 0
     limit_size = 1000
     
-    normalized_customer_id = re.sub(r"\D", "", str(customer_id or ""))
+    normalized_customer_id = _normalize_customer_id(customer_id)
+    candidate_ids = [str(customer_id).strip()]
+    if normalized_customer_id and normalized_customer_id not in candidate_ids:
+        candidate_ids.append(normalized_customer_id)
 
     while True:
-        response = sb.table(table_name) \
-            .select(columns) \
-            .eq('customer_id', normalized_customer_id) \
-            .gte('date', start_date) \
-            .lte('date', end_date) \
-            .range(offset, offset + limit_size - 1) \
-            .execute()
+        response = None
+        data = []
+        for candidate in candidate_ids:
+            response = sb.table(table_name) \
+                .select(columns) \
+                .eq('customer_id', candidate) \
+                .gte('date', start_date) \
+                .lte('date', end_date) \
+                .range(offset, offset + limit_size - 1) \
+                .execute()
+            data = response.data or []
+            if data:
+                break
             
-        data = response.data
         if not data:
             break
         
@@ -140,7 +163,6 @@ def aggregate_ads(rows):
     }
     
 def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
-    normalized_customer_id = re.sub(r"\D", "", str(customer_id or ""))
     empty_data = {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0}
     result = {
         'ga4_paid': empty_data.copy(), 
@@ -149,15 +171,23 @@ def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
         'ga4_total': empty_data.copy()
     }
 
-    property_id = (str(ga4_property_id).strip() if ga4_property_id else "") or None
+    property_id = _normalize_ga4_property_id(ga4_property_id)
     if not property_id:
+        normalized_customer_id = _normalize_customer_id(customer_id)
         account_res = (
             sb.table(CLIENT_ACCOUNT_TABLE).select("ga4_property_id").eq("customer_id", normalized_customer_id).execute()
         )
+        if not account_res.data and str(customer_id).strip() != normalized_customer_id:
+            account_res = (
+                sb.table(CLIENT_ACCOUNT_TABLE).select("ga4_property_id").eq("customer_id", str(customer_id).strip()).execute()
+            )
         if not account_res.data or not account_res.data[0].get("ga4_property_id"):
-            print(f"Warning: No GA4 Property ID found in database for client {normalized_customer_id}.")
-            return result
-        property_id = str(account_res.data[0]["ga4_property_id"]).strip()
+            print(f"Warning: No GA4 Property ID found in database for client {customer_id}.")
+            return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, result)
+        property_id = _normalize_ga4_property_id(account_res.data[0]["ga4_property_id"])
+        if not property_id:
+            print(f"Warning: GA4 Property ID is invalid for client {customer_id}.")
+            return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, result)
 
     request_channels = RunReportRequest(
         property=f"properties/{property_id}",
@@ -189,7 +219,7 @@ def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
         response_totals = ga4_client.run_report(request_totals)
     except Exception as e:
         print(f"GA4 API Live Fetch Error: {e}")
-        return result
+        return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, result)
 
     channel_map = {
         'Paid Search': 'ga4_paid',
@@ -223,6 +253,69 @@ def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
             'form_fills': 0
         }
             
+    return result
+
+
+def _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, seed_result=None):
+    result = seed_result or {
+        'ga4_paid': {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0},
+        'ga4_org': {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0},
+        'ga4_cross': {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0},
+        'ga4_total': {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0},
+    }
+
+    try:
+        rows = fetch_supabase_paginated(
+            'ga4_metrics',
+            customer_id,
+            start_date,
+            end_date,
+            'channel,vdp_views,sessions,avg_session_duration,users,bounce_rate,button_interactions,form_fills'
+        )
+    except Exception as e:
+        print(f"GA4 Supabase fallback error: {e}")
+        return result
+
+    if not rows:
+        return result
+
+    channel_map = {
+        'Paid Search': 'ga4_paid',
+        'Organic Search': 'ga4_org',
+        'Cross-network': 'ga4_cross',
+    }
+
+    for row in rows:
+        channel = str(row.get('channel') or '').strip()
+        key = channel_map.get(channel)
+        if not key:
+            continue
+        result[key]['vdp_views'] += int(row.get('vdp_views') or 0)
+        result[key]['sessions'] += int(row.get('sessions') or 0)
+        result[key]['users'] += int(row.get('users') or 0)
+        result[key]['button_interactions'] += int(row.get('button_interactions') or 0)
+        result[key]['form_fills'] += int(row.get('form_fills') or 0)
+        result[key]['bounce_rate'] += float(row.get('bounce_rate') or 0)
+        result[key]['avg_session_duration'] += float(row.get('avg_session_duration') or 0)
+
+    # Normalize average metrics and build total.
+    present_channels = 0
+    for key in ('ga4_paid', 'ga4_org', 'ga4_cross'):
+        ch = result[key]
+        if ch['sessions'] > 0:
+            present_channels += 1
+        result['ga4_total']['vdp_views'] += ch['vdp_views']
+        result['ga4_total']['sessions'] += ch['sessions']
+        result['ga4_total']['users'] += ch['users']
+        result['ga4_total']['button_interactions'] += ch['button_interactions']
+        result['ga4_total']['form_fills'] += ch['form_fills']
+        result['ga4_total']['bounce_rate'] += ch['bounce_rate']
+        result['ga4_total']['avg_session_duration'] += ch['avg_session_duration']
+
+    if present_channels > 0:
+        result['ga4_total']['bounce_rate'] = result['ga4_total']['bounce_rate'] / present_channels
+        result['ga4_total']['avg_session_duration'] = result['ga4_total']['avg_session_duration'] / present_channels
+
     return result
 
 def fetch_data(customer_id, start_date, end_date, ga4_property_id=None):

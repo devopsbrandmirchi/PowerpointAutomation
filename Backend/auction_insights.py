@@ -1,13 +1,11 @@
 import os
-import re
 from dotenv import load_dotenv
 from supabase import create_client
 from collections import defaultdict
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
-# 👇 FIX: Changed to MediaFileUpload for safe physical file uploads
-from googleapiclient.http import MediaFileUpload 
+from googleapiclient.http import MediaIoBaseUpload
 from drive_utils import get_drive_service
 
 # ==========================================
@@ -19,15 +17,26 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 
+
+def _normalize_customer_id(value) -> str:
+    raw = str(value or "").strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    return digits or raw
+
+
+def _customer_id_candidates(value) -> list[str]:
+    raw = str(value or "").strip()
+    normalized = _normalize_customer_id(raw)
+    out = []
+    for candidate in (raw, normalized):
+        if candidate and candidate not in out:
+            out.append(candidate)
+    return out
+
 def get_supabase():
     if not url or not key:
         raise ValueError("Missing Supabase URL or Key in .env file.")
     return create_client(url, key)
-
-
-def normalize_customer_id(customer_id: str) -> str:
-    """Normalize customer IDs like 123-456-7890 -> 1234567890."""
-    return re.sub(r"\D", "", str(customer_id or ""))
 
 
 # ==========================================
@@ -43,19 +52,18 @@ def upload_excel_to_drive(local_filename: str, drive_folder_id: str):
             'parents': [drive_folder_id]
         }
 
-        # 👇 FIX: Using MediaFileUpload which is 100% stable on DigitalOcean for local files
-        media = MediaFileUpload(
-            local_filename,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            resumable=True
-        )
-        
-        uploaded_file = drive.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, webViewLink',
-            supportsAllDrives=True
-        ).execute()
+        with open(local_filename, 'rb') as f:
+            media = MediaIoBaseUpload(
+                f,
+                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                resumable=True
+            )
+            uploaded_file = drive.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id, webViewLink',
+                supportsAllDrives=True
+            ).execute()
 
         file_link = uploaded_file.get('webViewLink')
         print(f"✅ Successfully uploaded! View it here: {file_link}")
@@ -91,19 +99,18 @@ def month_text_to_date_range(month_text: str):
 # 3. GET LATEST REPORT DATE FOR CUSTOMER
 # ==========================================
 def get_latest_report_date(customer_id: str):
-    customer_id = normalize_customer_id(customer_id)
     sb = get_supabase()
-    response = sb.table("google_ads_auction_master") \
-                 .select("report_date") \
-                 .eq("customer_id", customer_id) \
-                 .order("report_date", desc=True) \
-                 .limit(1) \
-                 .execute()
-
-    if response.data:
-        latest = response.data[0]["report_date"]
-        print(f"📅 Latest report_date found: {latest}")
-        return latest
+    for candidate in _customer_id_candidates(customer_id):
+        response = sb.table("google_ads_auction_master") \
+                     .select("report_date") \
+                     .eq("customer_id", candidate) \
+                     .order("report_date", desc=True) \
+                     .limit(1) \
+                     .execute()
+        if response.data:
+            latest = response.data[0]["report_date"]
+            print(f"📅 Latest report_date found: {latest} (customer_id={candidate})")
+            return latest
     return None
 
 
@@ -116,7 +123,6 @@ def get_auction_insights_data(
     start_date: str = None,
     end_date: str = None,
 ):
-    customer_id = normalize_customer_id(customer_id)
     sb = get_supabase()
 
     if start_date and end_date:
@@ -138,18 +144,25 @@ def get_auction_insights_data(
     print(f"Fetching DB -> Customer: {customer_id} | Range: {start_date} → {end_date}")
 
     try:
-        response = sb.table("google_ads_auction_master") \
-                     .select("account_name, campaign, domain, impression_share, position_above_rate, top_of_page_rate, absolute_top_of_page_rate, report_date") \
-                     .eq("customer_id", customer_id) \
-                     .gte("report_date", start_date) \
-                     .lte("report_date", end_date) \
-                     .execute()
-
-        raw_data = response.data or []
+        raw_data = []
+        matched_customer_id = None
+        for candidate in _customer_id_candidates(customer_id):
+            response = sb.table("google_ads_auction_master") \
+                         .select("account_name, campaign, domain, impression_share, position_above_rate, top_of_page_rate, absolute_top_of_page_rate, report_date") \
+                         .eq("customer_id", candidate) \
+                         .gte("report_date", start_date) \
+                         .lte("report_date", end_date) \
+                         .execute()
+            raw_data = response.data or []
+            if raw_data:
+                matched_customer_id = candidate
+                break
 
         if not raw_data:
             print(f"❌ No rows found for {customer_id} between {start_date} → {end_date}")
             return {}
+        if matched_customer_id:
+            print(f"✅ Auction rows matched using customer_id={matched_customer_id}")
 
         grouped = defaultdict(lambda: {
             "account_name": "",
@@ -248,7 +261,6 @@ def generate_auction_xlsx(
     start_date: str = None,
     end_date: str = None,
 ):
-    customer_id = normalize_customer_id(customer_id)
     data = get_auction_insights_data(
         customer_id,
         report_month=report_month,
@@ -375,7 +387,6 @@ def generate_auction_xlsx(
     filename = f"Auction_Insights_{safe_name}_{safe_month}.xlsx"
 
     wb.save(filename)
-    wb.close() # 👈 ADD THIS LINE HERE
     print(f"✅ Excel successfully generated and saved locally as: {filename}")
 
     return filename
@@ -389,7 +400,7 @@ if __name__ == "__main__":
 
     # WWheeler Digital Customer ID
     TEST_CUSTOMER_ID = "5691491477"
-    TEST_REPORT_MONTH = "April 2026"
+    TEST_REPORT_MONTH = "February 2026"
     
     # Wheels Digital Auction Insights folder
     TARGET_DRIVE_FOLDER_ID = "1pR1oWgzhA51YZm1c9MnZt3LULHLp_gAJ"
