@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Login from './Pages/login';
 import Dashbaord, { ReportGeneratorView } from './Pages/Dashbaord';
 import Drive from './Pages/Drive';
@@ -13,6 +13,8 @@ import RequireAuth from './Components/RequireAuth';
  * Idle timeout after login: `middleware/SessionGuard.jsx` inside the dashboard shell. See `docs/DEPLOYMENT.md`.
  */
 const App = () => {
+  // Fallback for hosts where SPA rewrites are not configured correctly (e.g. hard-refresh on Vercel preview/prod).
+  const Router = window.location.hostname.includes('vercel.app') ? HashRouter : BrowserRouter;
   return (
     <Router>
       <AuthProvider>
