@@ -202,6 +202,32 @@ def _generated_report_to_api(row: dict) -> dict:
         "files": files if isinstance(files, list) else [],
     }
 
+
+def _normalize_report_files(files: list[dict[str, Any]], export_mode: Optional[str] = None) -> list[dict[str, Any]]:
+    """
+    Ensure stored files keep a usable URL.
+    For Auction exports, fallback to the known Drive folder URL when driveUrl is missing.
+    """
+    normalized: list[dict[str, Any]] = []
+    mode = str(export_mode or "").strip().lower()
+    for f in files or []:
+        if not isinstance(f, dict):
+            continue
+        item = dict(f)
+        drive_url = item.get("driveUrl") or item.get("drive_url")
+        kind = str(item.get("kind") or "").strip().lower()
+        label = str(item.get("label") or "").strip().lower()
+
+        is_auction_file = kind == "xlsx" or "auction" in label or mode == "auction"
+        if not drive_url and is_auction_file:
+            drive_url = AUCTION_INSIGHTS_DRIVE_FOLDER_URL
+
+        item["driveUrl"] = drive_url
+        # Keep snake_case mirror for compatibility with mixed consumers.
+        item["drive_url"] = drive_url
+        normalized.append(item)
+    return normalized
+
 def load_client_config(client_id: str):
     sb = get_supabase()
     if not sb:
@@ -539,7 +565,15 @@ def create_drive_report(entry: GeneratedReportCreate):
     sb = get_supabase()
     if not sb: raise HTTPException(status_code=503, detail="Supabase not configured.")
     try:
-        row = {"folder_date": entry.folder_date[:10], "report_range_start": entry.report_range_start[:10], "report_range_end": entry.report_range_end[:10], "client_key": entry.client_key, "client_name": entry.client_name, "export_mode": entry.export_mode, "files": entry.files}
+        row = {
+            "folder_date": entry.folder_date[:10],
+            "report_range_start": entry.report_range_start[:10],
+            "report_range_end": entry.report_range_end[:10],
+            "client_key": entry.client_key,
+            "client_name": entry.client_name,
+            "export_mode": entry.export_mode,
+            "files": _normalize_report_files(entry.files, export_mode=entry.export_mode),
+        }
         res = sb.table("generated_reports").insert(row).execute()
         if res.data: return _generated_report_to_api(res.data[0])
         return {"ok": True}
@@ -563,7 +597,12 @@ def patch_drive_report_files(report_id: str, body: GeneratedReportFilesPatch):
         if not body.files:
             sb.table("generated_reports").delete().eq("id", rid).execute()
             return {"ok": True, "deleted": True}
-        res = sb.table("generated_reports").update({"files": body.files}).eq("id", rid).execute()
+        existing = sb.table("generated_reports").select("export_mode").eq("id", rid).limit(1).execute()
+        export_mode = None
+        if existing.data:
+            export_mode = existing.data[0].get("export_mode")
+        safe_files = _normalize_report_files(body.files, export_mode=export_mode)
+        res = sb.table("generated_reports").update({"files": safe_files}).eq("id", rid).execute()
         if res.data: return _generated_report_to_api(res.data[0])
         return {"ok": True}
     except Exception as e: raise HTTPException(status_code=503, detail=str(e))
