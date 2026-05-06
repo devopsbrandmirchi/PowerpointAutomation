@@ -15,7 +15,10 @@ load_dotenv(_BACKEND_DIR / ".env")
 
 def _resolve_ga4_credentials_path() -> Path:
     """Resolve GA4 service account JSON. Handles Docker-style paths and broken absolutes like /Backend/...."""
-    raw = (os.environ.get("GA4_CREDENTIALS") or "").strip()
+    raw = (
+        (os.environ.get("GOOGLE_CREDENTIALS_FILE") or "").strip()
+        or (os.environ.get("GA4_CREDENTIALS") or "").strip()
+    )
     candidates: list[Path] = []
     if raw:
         p = Path(raw)
@@ -25,7 +28,16 @@ def _resolve_ga4_credentials_path() -> Path:
                 candidates.append(_BACKEND_DIR / p.name)
         else:
             candidates.append(_BACKEND_DIR / p)
-    candidates.append(_BACKEND_DIR / "ga4-credentials.json")
+    candidates.extend(
+        [
+            _BACKEND_DIR / "ga4-credentials.json",
+            _BACKEND_DIR / "credentials.json",
+            Path("/app/ga4-credentials.json"),
+            Path("/app/credentials.json"),
+            Path("/app/secrets/ga4-credentials.json"),
+            Path("/app/secrets/credentials.json"),
+        ]
+    )
     for c in candidates:
         try:
             rp = c.resolve()

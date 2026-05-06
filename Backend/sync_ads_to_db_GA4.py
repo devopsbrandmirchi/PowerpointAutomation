@@ -16,7 +16,53 @@ load_dotenv(BASE_DIR / ".env")
 
 MASTER_TABLE = os.environ.get("SUPABASE_CLIENT_TABLE", "google_ads_accounts")
 METRICS_TABLE = "ga4_metrics"
-CREDENTIALS_FILE = str(BASE_DIR / "ga4-credentials.json")
+
+
+def _resolve_ga4_credentials_file() -> str:
+    """
+    Resolve GA4 service-account JSON from env or common local/container paths.
+    """
+    env_path = (
+        (os.environ.get("GOOGLE_CREDENTIALS_FILE") or "").strip()
+        or (os.environ.get("GA4_CREDENTIALS") or "").strip()
+        or "ga4-credentials.json"
+    )
+    p = Path(env_path)
+
+    candidates: list[Path] = []
+    if p.is_absolute():
+        candidates.append(p)
+        if not p.is_file():
+            candidates.append(BASE_DIR / p.name)
+    else:
+        candidates.append(BASE_DIR / p)
+
+    # Common filenames/locations used in this project.
+    candidates.extend(
+        [
+            BASE_DIR / "ga4-credentials.json",
+            BASE_DIR / "credentials.json",
+            Path("/app/ga4-credentials.json"),
+            Path("/app/credentials.json"),
+            Path("/app/secrets/ga4-credentials.json"),
+            Path("/app/secrets/credentials.json"),
+        ]
+    )
+
+    checked: list[str] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        checked.append(str(resolved))
+        if resolved.is_file():
+            return str(resolved)
+
+    raise FileNotFoundError(
+        "Missing GA4 credentials JSON. Checked: "
+        + ", ".join(checked)
+    )
 
 # --- EXACT BUTTON LIST (must match events in GA4 UI) ---
 BUTTON_EVENT_NAMES = [
@@ -41,12 +87,8 @@ def get_supabase() -> Client:
 
 
 def get_ga4_client() -> BetaAnalyticsDataClient:
-    if not os.path.isfile(CREDENTIALS_FILE):
-        raise FileNotFoundError(
-            f"Missing credentials file: {CREDENTIALS_FILE}\n"
-            "Download your Service Account JSON from Google Cloud Console."
-        )
-    return BetaAnalyticsDataClient.from_service_account_file(CREDENTIALS_FILE)
+    credentials_file = _resolve_ga4_credentials_file()
+    return BetaAnalyticsDataClient.from_service_account_file(credentials_file)
 
 
 def fetch_accounts(sb: Client, client_id: Optional[str] = None) -> list[dict[str, Any]]:

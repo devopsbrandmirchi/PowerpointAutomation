@@ -24,16 +24,27 @@ def _resolve_service_account_json() -> str:
             candidates.append(_BACKEND_DIR / p.name)
     else:
         candidates.append(_BACKEND_DIR / p)
-    candidates.append(_BACKEND_DIR / "ga4-credentials.json")
+    candidates.extend(
+        [
+            _BACKEND_DIR / "ga4-credentials.json",
+            _BACKEND_DIR / "credentials.json",
+            Path("/app/ga4-credentials.json"),
+            Path("/app/credentials.json"),
+            Path("/app/secrets/ga4-credentials.json"),
+            Path("/app/secrets/credentials.json"),
+        ]
+    )
+    checked: list[str] = []
     for c in candidates:
         try:
             rp = c.resolve()
         except OSError:
             continue
+        checked.append(str(rp))
         if rp.is_file():
             return str(rp)
     raise FileNotFoundError(
-        f"Service account JSON not found (checked GOOGLE_CREDENTIALS_FILE, GA4_CREDENTIALS, {_BACKEND_DIR / 'ga4-credentials.json'})"
+        "Service account JSON not found. Checked: " + ", ".join(checked)
     )
 
 
