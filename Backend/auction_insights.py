@@ -6,7 +6,8 @@ from collections import defaultdict
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
-from googleapiclient.http import MediaIoBaseUpload
+# 👇 FIX: Changed to MediaFileUpload for safe physical file uploads
+from googleapiclient.http import MediaFileUpload 
 from drive_utils import get_drive_service
 
 # ==========================================
@@ -42,18 +43,19 @@ def upload_excel_to_drive(local_filename: str, drive_folder_id: str):
             'parents': [drive_folder_id]
         }
 
-        with open(local_filename, 'rb') as f:
-            media = MediaIoBaseUpload(
-                f,
-                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                resumable=True
-            )
-            uploaded_file = drive.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id, webViewLink',
-                supportsAllDrives=True
-            ).execute()
+        # 👇 FIX: Using MediaFileUpload which is 100% stable on DigitalOcean for local files
+        media = MediaFileUpload(
+            local_filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            resumable=True
+        )
+        
+        uploaded_file = drive.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink',
+            supportsAllDrives=True
+        ).execute()
 
         file_link = uploaded_file.get('webViewLink')
         print(f"✅ Successfully uploaded! View it here: {file_link}")
@@ -373,6 +375,7 @@ def generate_auction_xlsx(
     filename = f"Auction_Insights_{safe_name}_{safe_month}.xlsx"
 
     wb.save(filename)
+    wb.close() # 👈 ADD THIS LINE HERE
     print(f"✅ Excel successfully generated and saved locally as: {filename}")
 
     return filename
@@ -386,7 +389,7 @@ if __name__ == "__main__":
 
     # WWheeler Digital Customer ID
     TEST_CUSTOMER_ID = "5691491477"
-    TEST_REPORT_MONTH = "February 2026"
+    TEST_REPORT_MONTH = "April 2026"
     
     # Wheels Digital Auction Insights folder
     TARGET_DRIVE_FOLDER_ID = "1pR1oWgzhA51YZm1c9MnZt3LULHLp_gAJ"
