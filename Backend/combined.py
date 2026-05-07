@@ -45,6 +45,35 @@ def _normalize_ga4_property_id(value) -> str:
         raw = raw[:-2]
     return "".join(ch for ch in raw if ch.isdigit())
 
+
+def fetch_descriptive_name(customer_id) -> str:
+    """Account display name from CLIENT_ACCOUNT_TABLE (descriptive_name column)."""
+    normalized = _normalize_customer_id(customer_id)
+    candidates = [c for c in (normalized, str(customer_id).strip()) if c]
+    for cid in candidates:
+        res = (
+            sb.table(CLIENT_ACCOUNT_TABLE)
+            .select("descriptive_name")
+            .eq("customer_id", cid)
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            name = res.data[0].get("descriptive_name")
+            if name is not None and str(name).strip():
+                return str(name).strip()
+    return ""
+
+
+def _format_iso_date_display(iso_date: str) -> str:
+    d = datetime.strptime(iso_date, "%Y-%m-%d")
+    return f"{d.strftime('%b')} {d.day}, {d.year}"
+
+
+def _format_period_range_display(start_iso: str, end_iso: str) -> str:
+    return f"{_format_iso_date_display(start_iso)} – {_format_iso_date_display(end_iso)}"
+
+
 # --- UTILITIES ---
 def format_duration(seconds):
     if not seconds or seconds == 0:
@@ -354,14 +383,14 @@ def fetch_data(customer_id, start_date, end_date, ga4_property_id=None):
         'ads':       aggregate_ads(ads_raw_data),
     }
 
-def build_full_data(customer_id, start_date, end_date, ga4_property_id=None):
+def build_full_data(customer_id, start_date, end_date, ga4_property_id=None, customer_name_fallback=None):
     current = fetch_data(customer_id, start_date, end_date, ga4_property_id=ga4_property_id)
 
-    s = datetime.strptime(start_date, '%Y-%m-%d')
-    
+    s = datetime.strptime(start_date, "%Y-%m-%d")
+
     prev_s = s - relativedelta(months=1)
-    prev_start = prev_s.strftime('%Y-%m-%d')
-    prev_end = (s - relativedelta(days=1)).strftime('%Y-%m-%d')
+    prev_start = prev_s.strftime("%Y-%m-%d")
+    prev_end = (s - relativedelta(days=1)).strftime("%Y-%m-%d")
 
     previous = fetch_data(customer_id, prev_start, prev_end, ga4_property_id=ga4_property_id)
 
@@ -377,7 +406,23 @@ def build_full_data(customer_id, start_date, end_date, ga4_property_id=None):
     pt = previous['ga4_total']
     pa = previous['ads']
 
+    customer_name = fetch_descriptive_name(customer_id) or (str(customer_name_fallback).strip() if customer_name_fallback else "")
+
     data = {
+        # --- Customer: DB descriptive_name; use {{customer_name}} / {{descriptive_name}} (or PLACEHOLDER_*)
+        'customer_name': customer_name,
+        'descriptive_name': customer_name,
+
+        # --- Report dates (current = start_date..end_date; previous = MoM window used in metrics)
+        'current_month_label': s.strftime("%B %Y"),
+        'previous_month_label': prev_s.strftime("%B %Y"),
+        'report_current_start': start_date,
+        'report_current_end': end_date,
+        'report_previous_start': prev_start,
+        'report_previous_end': prev_end,
+        'current_period_range': _format_period_range_display(start_date, end_date),
+        'previous_period_range': _format_period_range_display(prev_start, prev_end),
+
         # ==========================================
         # --- GA4 GRAND TOTALS (Uses MoM Change) ---
         # ==========================================

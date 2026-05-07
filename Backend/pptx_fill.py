@@ -96,6 +96,7 @@ def run_ppt_job(cfg, start_date, end_date, month_label, progress_cb=None):
             start_date,
             end_date,
             ga4_property_id=cfg.get('ga4_property_id'),
+            customer_name_fallback=cfg.get('client_name'),
         )
         print(f"Data fetched: {len(data)} values")
         emit({"kind": "log", "message": f"Data fetched: {len(data)} values"})
