@@ -129,6 +129,8 @@ class GenerateRequest(BaseModel):
     start_date: str
     end_date: str
     generate_ppt: bool = True
+    prev_start_date: Optional[str] = None
+    prev_end_date: Optional[str] = None
 
 class AuctionInsightsRequest(BaseModel):
     customer_id: str
@@ -257,7 +259,15 @@ def _generate_worker_sync(request: GenerateRequest, cfg: dict, month_label: str,
     try:
         if request.generate_ppt:
             try:
-                ppt = run_ppt_job(cfg, request.start_date, request.end_date, month_label, progress_cb=forward)
+                ppt = run_ppt_job(
+                    cfg,
+                    request.start_date,
+                    request.end_date,
+                    month_label,
+                    progress_cb=forward,
+                    prev_start_date=request.prev_start_date,
+                    prev_end_date=request.prev_end_date,
+                )
                 result["ppt"] = ppt
             except Exception as e:
                 result["ppt_error"] = str(e)
@@ -431,8 +441,20 @@ async def generate(request: GenerateRequest):
     loop = asyncio.get_running_loop()
 
     if request.generate_ppt:
-        try: result["ppt"] = await loop.run_in_executor(executor, run_ppt_job, cfg, request.start_date, request.end_date, month_label)
-        except Exception as e: result["ppt_error"] = str(e)
+        try:
+            result["ppt"] = await loop.run_in_executor(
+                executor,
+                lambda: run_ppt_job(
+                    cfg,
+                    request.start_date,
+                    request.end_date,
+                    month_label,
+                    prev_start_date=request.prev_start_date,
+                    prev_end_date=request.prev_end_date,
+                ),
+            )
+        except Exception as e:
+            result["ppt_error"] = str(e)
 
     return result
 

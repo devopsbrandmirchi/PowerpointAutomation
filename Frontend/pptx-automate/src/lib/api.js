@@ -25,9 +25,55 @@ async function parseJsonResponse(res, fallbackLabel) {
   }
 }
 
-export async function fetchClients() {
-  const res = await fetch(`${getApiBase()}/clients`);
-  return parseJsonResponse(res, 'Failed to load clients');
+/**
+ * Sleep helper for retry backoff.
+ * @param {number} ms
+ */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch with timeout via AbortController.
+ * @param {string} url
+ * @param {RequestInit & { timeoutMs?: number }} [init]
+ */
+async function fetchWithTimeout(url, init = {}) {
+  const { timeoutMs = 15000, signal, ...rest } = init;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  // Forward external aborts.
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+  }
+  try {
+    return await fetch(url, { ...rest, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * @param {{ retries?: number, timeoutMs?: number, signal?: AbortSignal }} [opts]
+ */
+export async function fetchClients(opts = {}) {
+  const { retries = 2, timeoutMs = 15000, signal } = opts;
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const res = await fetchWithTimeout(`${getApiBase()}/clients`, { timeoutMs, signal });
+      return await parseJsonResponse(res, 'Failed to load clients');
+    } catch (e) {
+      lastErr = e;
+      // Don't retry user-cancelled requests.
+      if (signal?.aborted) throw e;
+      if (attempt < retries) {
+        await sleep(600 * (attempt + 1));
+      }
+    }
+  }
+  throw lastErr || new Error('Failed to load clients');
 }
 
 /**

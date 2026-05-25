@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Layout from '../Layout/layout';
 import SessionGuard from '../middleware/SessionGuard';
@@ -55,6 +55,33 @@ function initialReportRange() {
   const ymd = (d) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   return { start: ymd(first), end: ymd(last) };
+}
+
+function ymdToParts(value) {
+  if (!value) return null;
+  const [y, m, d] = String(value).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return { y, m, d };
+}
+
+function partsToYmd(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Shift a YYYY-MM-DD by N calendar months (clamps to last day of target month). */
+function shiftYmdByMonths(value, months) {
+  const parts = ymdToParts(value);
+  if (!parts) return value;
+  const targetMonth = parts.m - 1 + months;
+  const target = new Date(parts.y, targetMonth, 1);
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  target.setDate(Math.min(parts.d, lastDay));
+  return partsToYmd(target);
+}
+
+/** Default previous range = same length as current shifted back 1 month. */
+function defaultPrevRange(start, end) {
+  return { start: shiftYmdByMonths(start, -1), end: shiftYmdByMonths(end, -1) };
 }
 
 function collectGeneratedFiles(clientKey, exportMode, result) {
@@ -337,6 +364,8 @@ export function ReportGeneratorView() {
   const [exportMode, setExportMode] = useState('both');
   const [clients, setClients] = useState([]);
   const [clientsLoadError, setClientsLoadError] = useState(null);
+  const [clientsLoading, setClientsLoading] = useState(true);
+  const [clientsRetryToken, setClientsRetryToken] = useState(0);
   const [selectedClient, setSelectedClient] = useState('');
   const [generationPhase, setGenerationPhase] = useState('idle');
   const [generationResult, setGenerationResult] = useState(null);
@@ -347,16 +376,22 @@ export function ReportGeneratorView() {
   const [reportStartDate, setReportStartDate] = useState(() => initialReportRange().start);
   const [reportEndDate, setReportEndDate] = useState(() => initialReportRange().end);
   const [reportDatePreset, setReportDatePreset] = useState('custom');
+  const [prevManualStart, setPrevManualStart] = useState('');
+  const [prevManualEnd, setPrevManualEnd] = useState('');
+  const [prevDatePreset, setPrevDatePreset] = useState('custom');
+  const [prevDateAuto, setPrevDateAuto] = useState(true);
   const driveSaveDoneRef = useRef(false);
   const [clientDropdownOpen, setClientDropdownOpen] = useState(false);
   const [clientSearchQuery, setClientSearchQuery] = useState('');
   const clientDropdownRef = useRef(null);
 
   useEffect(() => {
+    const ctrl = new AbortController();
     let cancelled = false;
+    setClientsLoading(true);
     (async () => {
       try {
-        const list = await fetchClients();
+        const list = await fetchClients({ retries: 3, timeoutMs: 15000, signal: ctrl.signal });
         if (cancelled) return;
         setClients(Array.isArray(list) ? list : []);
         setClientsLoadError(null);
@@ -368,16 +403,19 @@ export function ReportGeneratorView() {
           });
         }
       } catch (e) {
-        if (!cancelled) {
+        if (!cancelled && !ctrl.signal.aborted) {
           setClientsLoadError(e?.message || 'Failed to load clients');
           setClients([]);
         }
+      } finally {
+        if (!cancelled) setClientsLoading(false);
       }
     })();
     return () => {
       cancelled = true;
+      ctrl.abort();
     };
-  }, []);
+  }, [clientsRetryToken]);
 
   useEffect(() => {
     if (!clients.length) return;
@@ -400,6 +438,20 @@ export function ReportGeneratorView() {
     () => clients.find((c) => c.id === selectedClient),
     [clients, selectedClient],
   );
+
+  const autoPrevRange = useMemo(
+    () => defaultPrevRange(reportStartDate, reportEndDate),
+    [reportStartDate, reportEndDate],
+  );
+  const prevStartDate = prevDateAuto ? autoPrevRange.start : prevManualStart;
+  const prevEndDate = prevDateAuto ? autoPrevRange.end : prevManualEnd;
+
+  const resetPrevRangeToAuto = useCallback(() => {
+    setPrevManualStart('');
+    setPrevManualEnd('');
+    setPrevDatePreset('custom');
+    setPrevDateAuto(true);
+  }, []);
 
   const clientsSorted = useMemo(() => {
     const list = Array.isArray(clients) ? clients.filter((c) => clientBelongsToActiveAgency(c.id)) : [];
@@ -582,6 +634,8 @@ export function ReportGeneratorView() {
         client_id: selectedClient,
         start_date: reportStartDate,
         end_date: reportEndDate,
+        prev_start_date: prevStartDate,
+        prev_end_date: prevEndDate,
         generate_ppt: true,
       };
       const pptResult = await postGenerateStream(pptBody, (ev) => {
@@ -700,6 +754,8 @@ export function ReportGeneratorView() {
       client_id: selectedClient,
       start_date: reportStartDate,
       end_date: reportEndDate,
+      prev_start_date: prevStartDate,
+      prev_end_date: prevEndDate,
       generate_ppt: true,
     };
 
@@ -808,10 +864,20 @@ export function ReportGeneratorView() {
           Configure client scope, date range, and export format to generate marketing performance reports.
         </p>
         {clientsLoadError ? (
-          <p className="mt-4 max-w-2xl rounded-lg border border-amber-200/90 bg-amber-50/95 px-3 py-2 text-sm text-amber-950">
-            Could not load clients from the API ({clientsLoadError}). Using an empty list; check{' '}
-            <code className="rounded bg-amber-100/80 px-1 text-xs">VITE_API_URL</code> and that FastAPI is running.
-          </p>
+          <div className="mt-4 flex max-w-2xl flex-col gap-2 rounded-lg border border-amber-200/90 bg-amber-50/95 px-3 py-2 text-sm text-amber-950 sm:flex-row sm:items-center sm:justify-between">
+            <p className="min-w-0">
+              Could not load clients from the API ({clientsLoadError}). Using an empty list; check{' '}
+              <code className="rounded bg-amber-100/80 px-1 text-xs">VITE_API_URL</code> and that FastAPI is running.
+            </p>
+            <button
+              type="button"
+              onClick={() => setClientsRetryToken((t) => t + 1)}
+              disabled={clientsLoading}
+              className="shrink-0 rounded-lg border border-amber-300 bg-amber-100/80 px-3 py-1.5 text-xs font-semibold text-amber-950 transition-colors hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {clientsLoading ? 'Retrying…' : 'Retry'}
+            </button>
+          </div>
         ) : null}
       </header>
 
@@ -971,27 +1037,64 @@ export function ReportGeneratorView() {
                 ) : null}
               </div>
 
-              <div className="min-w-0 flex-1">
-                <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
-                  Date selection
-                </p>
-                <DateRangePicker
-                  preset={reportDatePreset}
-                  dateFrom={reportStartDate}
-                  dateTo={reportEndDate}
-                  compareOn={false}
-                  compareFrom=""
-                  compareTo=""
-                  disabled={isGenerating}
-                  variant="dashboard"
-                  onApply={(payload) => {
-                    setReportDatePreset(payload.preset);
-                    if (payload.dateFrom && payload.dateTo) {
-                      setReportStartDate(payload.dateFrom);
-                      setReportEndDate(payload.dateTo);
-                    }
-                  }}
-                />
+              <div className="min-w-0 flex-1 space-y-4">
+                <div>
+                  <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                    Date selection (current period)
+                  </p>
+                  <DateRangePicker
+                    preset={reportDatePreset}
+                    dateFrom={reportStartDate}
+                    dateTo={reportEndDate}
+                    compareOn={false}
+                    compareFrom=""
+                    compareTo=""
+                    disabled={isGenerating}
+                    variant="dashboard"
+                    onApply={(payload) => {
+                      setReportDatePreset(payload.preset);
+                      if (payload.dateFrom && payload.dateTo) {
+                        setReportStartDate(payload.dateFrom);
+                        setReportEndDate(payload.dateTo);
+                      }
+                    }}
+                  />
+                </div>
+                <div>
+                  <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                      Previous period {prevDateAuto ? <span className="ml-1 normal-case text-on-surface-variant/70">(auto-shifted 1 month back)</span> : null}
+                    </p>
+                    {!prevDateAuto ? (
+                      <button
+                        type="button"
+                        onClick={resetPrevRangeToAuto}
+                        disabled={isGenerating}
+                        className="rounded-lg border border-[rgba(194,198,209,0.45)] bg-surface-container-lowest px-2.5 py-1 text-[11px] font-semibold text-primary transition-colors hover:bg-surface-container-high disabled:opacity-50"
+                      >
+                        Reset to auto
+                      </button>
+                    ) : null}
+                  </div>
+                  <DateRangePicker
+                    preset={prevDatePreset}
+                    dateFrom={prevStartDate}
+                    dateTo={prevEndDate}
+                    compareOn={false}
+                    compareFrom=""
+                    compareTo=""
+                    disabled={isGenerating}
+                    variant="dashboard"
+                    onApply={(payload) => {
+                      setPrevDatePreset(payload.preset);
+                      if (payload.dateFrom && payload.dateTo) {
+                        setPrevManualStart(payload.dateFrom);
+                        setPrevManualEnd(payload.dateTo);
+                        setPrevDateAuto(false);
+                      }
+                    }}
+                  />
+                </div>
               </div>
             </div>
           </div>

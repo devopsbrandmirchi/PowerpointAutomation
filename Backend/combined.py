@@ -383,14 +383,42 @@ def fetch_data(customer_id, start_date, end_date, ga4_property_id=None):
         'ads':       aggregate_ads(ads_raw_data),
     }
 
-def build_full_data(customer_id, start_date, end_date, ga4_property_id=None, customer_name_fallback=None):
+def build_full_data(
+    customer_id,
+    start_date,
+    end_date,
+    ga4_property_id=None,
+    customer_name_fallback=None,
+    prev_start_date=None,
+    prev_end_date=None,
+):
+    """Current window = [start_date, end_date]. Previous window:
+       - If prev_start_date/prev_end_date are passed, use them.
+       - Otherwise default to the same length shifted back exactly 1 month
+         (e.g. Mar 15–25 → Feb 15–25), NOT "the whole previous calendar month".
+    """
     current = fetch_data(customer_id, start_date, end_date, ga4_property_id=ga4_property_id)
 
     s = datetime.strptime(start_date, "%Y-%m-%d")
+    e = datetime.strptime(end_date, "%Y-%m-%d")
 
-    prev_s = s - relativedelta(months=1)
-    prev_start = prev_s.strftime("%Y-%m-%d")
-    prev_end = (s - relativedelta(days=1)).strftime("%Y-%m-%d")
+    if prev_start_date and prev_end_date:
+        prev_start = prev_start_date
+        prev_end = prev_end_date
+        prev_s = datetime.strptime(prev_start, "%Y-%m-%d")
+        prev_source = "client-provided"
+    else:
+        prev_s = s - relativedelta(months=1)
+        prev_e = e - relativedelta(months=1)
+        prev_start = prev_s.strftime("%Y-%m-%d")
+        prev_end = prev_e.strftime("%Y-%m-%d")
+        prev_source = "auto-shifted"
+
+    print(
+        f" -> DEBUG: customer={customer_id} | "
+        f"current={start_date}..{end_date} | "
+        f"previous={prev_start}..{prev_end} ({prev_source})"
+    )
 
     previous = fetch_data(customer_id, prev_start, prev_end, ga4_property_id=ga4_property_id)
 

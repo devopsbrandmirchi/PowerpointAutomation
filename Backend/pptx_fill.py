@@ -72,7 +72,15 @@ def fill_presentation(data, template_path, output_path):
     return {'found': placeholders_found, 'missing': placeholders_missing}
 
 
-def run_ppt_job(cfg, start_date, end_date, month_label, progress_cb=None):
+def run_ppt_job(
+    cfg,
+    start_date,
+    end_date,
+    month_label,
+    progress_cb=None,
+    prev_start_date=None,
+    prev_end_date=None,
+):
     """progress_cb receives dicts: kind \"log\" | \"download\", optional percent, message."""
 
     def emit(payload):
@@ -97,6 +105,8 @@ def run_ppt_job(cfg, start_date, end_date, month_label, progress_cb=None):
             end_date,
             ga4_property_id=cfg.get('ga4_property_id'),
             customer_name_fallback=cfg.get('client_name'),
+            prev_start_date=prev_start_date,
+            prev_end_date=prev_end_date,
         )
         print(f"Data fetched: {len(data)} values")
         emit({"kind": "log", "message": f"Data fetched: {len(data)} values"})
