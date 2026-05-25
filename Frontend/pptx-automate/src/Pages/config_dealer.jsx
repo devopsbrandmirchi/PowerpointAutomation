@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { supabase, isSupabaseAuthConfigured } from '../lib/supabaseClient';
 import { postGa4SyncStream } from '../lib/api';
 import { useAgency } from '../context/AgencyContext';
@@ -10,6 +11,29 @@ import { useAgency } from '../context/AgencyContext';
 const DEALER_TABLE = import.meta.env.VITE_SUPABASE_CLIENT_TABLE?.trim() || 'google_ads_accounts';
 
 const GA_SERVICE_ACCOUNT_EMAIL = 'ga4-automation@leisuretime-184200.iam.gserviceaccount.com';
+const DEALERS_PER_PAGE = 15;
+const DEALER_SAMPLE_CSV_URL = `${import.meta.env.BASE_URL}dealer_import_sample.csv`;
+
+/** Columns for CSV / Excel-style bulk import (header row required). */
+const DEALER_CSV_COLUMNS = [
+  { key: 'descriptive_name', label: 'descriptive_name', required: true, hint: 'Display name on reports' },
+  { key: 'client_id', label: 'client_id', required: true, hint: 'Unique key (e.g. zoomers_rv)' },
+  { key: 'customer_id', label: 'customer_id', required: true, hint: 'Google Ads customer ID (digits)' },
+  { key: 'template_drive_id', label: 'template_drive_id', required: false, hint: 'Drive template file/folder ID' },
+  { key: 'output_file_drive_id', label: 'output_file_drive_id', required: false, hint: 'Drive output file/folder ID' },
+  { key: 'ga4_property_id', label: 'ga4_property_id', required: false, hint: 'GA4 property ID (digits)' },
+  { key: 'login_customer_id', label: 'login_customer_id', required: false, hint: 'MCC / manager customer ID (optional)' },
+];
+
+const HEADER_ALIASES = {
+  descriptive_name: ['descriptive_name', 'dealer_name', 'name', 'customer_name', 'account_name'],
+  client_id: ['client_id', 'client id', 'clientid'],
+  customer_id: ['customer_id', 'customer id', 'google_ads_customer_id', 'ads_customer_id'],
+  template_drive_id: ['template_drive_id', 'template drive id', 'template_id'],
+  output_file_drive_id: ['output_file_drive_id', 'output_drive_id', 'output file drive id'],
+  ga4_property_id: ['ga4_property_id', 'ga4 property id', 'ga4_id', 'property_id'],
+  login_customer_id: ['login_customer_id', 'login customer id', 'manager_id', 'mcc_id'],
+};
 
 function sortRows(rows) {
   return [...rows].sort((a, b) => {
@@ -66,11 +90,152 @@ function rowMatchesSearch(row, q) {
     row.template_drive_id,
     row.output_file_drive_id,
     row.ga4_property_id,
+    row.login_customer_id,
   ]
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
   return hay.includes(q);
+}
+
+function normalizeCustomerId(value) {
+  return String(value ?? '').replace(/\D/g, '');
+}
+
+function emptyDealerDraft() {
+  return {
+    descriptive_name: '',
+    customer_id: '',
+    template_drive_id: '',
+    output_file_drive_id: '',
+    ga4_property_id: '',
+    login_customer_id: '',
+  };
+}
+
+function rowToDraft(row) {
+  return {
+    descriptive_name: row.descriptive_name ?? '',
+    customer_id: row.customer_id != null && row.customer_id !== undefined ? String(row.customer_id) : '',
+    template_drive_id: row.template_drive_id ?? '',
+    output_file_drive_id: row.output_file_drive_id ?? '',
+    ga4_property_id:
+      row.ga4_property_id != null && row.ga4_property_id !== undefined ? String(row.ga4_property_id) : '',
+    login_customer_id:
+      row.login_customer_id != null && row.login_customer_id !== undefined ? String(row.login_customer_id) : '',
+  };
+}
+
+function buildSavePayload(draft) {
+  const name = trimVal(draft.descriptive_name);
+  const customerId = normalizeCustomerId(draft.customer_id);
+  const ga4 = trimVal(draft.ga4_property_id).replace(/\D/g, '') || null;
+  const login = normalizeCustomerId(draft.login_customer_id) || null;
+  return {
+    descriptive_name: name || null,
+    customer_id: customerId || null,
+    template_drive_id: trimVal(draft.template_drive_id) || null,
+    output_file_drive_id: trimVal(draft.output_file_drive_id) || null,
+    ga4_property_id: ga4,
+    login_customer_id: login,
+  };
+}
+
+function normHeader(cell) {
+  return String(cell ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_');
+}
+
+function mapCsvHeaderIndex(headers) {
+  const index = {};
+  const norm = headers.map(normHeader);
+  for (const col of DEALER_CSV_COLUMNS) {
+    const aliases = HEADER_ALIASES[col.key] || [col.key];
+    const i = norm.findIndex((h) => aliases.some((a) => normHeader(a) === h || h === normHeader(a)));
+    if (i >= 0) index[col.key] = i;
+  }
+  return index;
+}
+
+/** Minimal CSV parser (quoted fields supported). */
+function parseCsvText(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let inQuotes = false;
+  const pushCell = () => {
+    row.push(cell);
+    cell = '';
+  };
+  const pushRow = () => {
+    if (row.length === 1 && row[0] === '' && rows.length) return;
+    rows.push(row);
+    row = [];
+  };
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (inQuotes) {
+      if (ch === '"' && next === '"') {
+        cell += '"';
+        i += 1;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        cell += ch;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (ch === ',') {
+      pushCell();
+      continue;
+    }
+    if (ch === '\n' || (ch === '\r' && next === '\n')) {
+      pushCell();
+      pushRow();
+      if (ch === '\r') i += 1;
+      continue;
+    }
+    if (ch === '\r') {
+      pushCell();
+      pushRow();
+      continue;
+    }
+    cell += ch;
+  }
+  pushCell();
+  if (row.length) pushRow();
+  return rows;
+}
+
+function parseDealerCsv(text) {
+  const table = parseCsvText(text);
+  if (table.length < 2) {
+    throw new Error('CSV must include a header row and at least one data row.');
+  }
+  const headerIdx = mapCsvHeaderIndex(table[0]);
+  if (headerIdx.client_id == null || headerIdx.customer_id == null) {
+    throw new Error('CSV header must include client_id and customer_id columns.');
+  }
+  const records = [];
+  for (let r = 1; r < table.length; r += 1) {
+    const line = table[r];
+    if (!line.some((c) => trimVal(c))) continue;
+    const rec = {};
+    for (const col of DEALER_CSV_COLUMNS) {
+      const i = headerIdx[col.key];
+      rec[col.key] = i == null ? '' : line[i] ?? '';
+    }
+    records.push(rec);
+  }
+  if (!records.length) throw new Error('No data rows found in CSV.');
+  return records;
 }
 
 function detectGa4ServiceDisabled(logs) {
@@ -87,7 +252,13 @@ function detectGa4ServiceDisabled(logs) {
 }
 
 export default function ConfigDealer() {
-  const { clientBelongsToActiveAgency, registerClientIds, activeAgency } = useAgency();
+  const {
+    clientBelongsToActiveAgency,
+    registerClientIds,
+    activeAgency,
+    linkClientToActiveAgency,
+    unlinkClientFromAgencyMap,
+  } = useAgency();
   const [rows, setRows] = useState([]);
   const [drafts, setDrafts] = useState({});
   const [loading, setLoading] = useState(true);
@@ -95,8 +266,18 @@ export default function ConfigDealer() {
   const [savingId, setSavingId] = useState(null);
   const [saveError, setSaveError] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [dealerPage, setDealerPage] = useState(1);
   /** client_ids currently showing the full form (edit mode) */
   const [editingIds, setEditingIds] = useState(() => new Set());
+  /** @type {'create' | 'edit' | null} */
+  const [dealerModalMode, setDealerModalMode] = useState(null);
+  const [dealerModalClientId, setDealerModalClientId] = useState(null);
+  const [dealerModalForm, setDealerModalForm] = useState(emptyDealerDraft);
+  const [csvPanelOpen, setCsvPanelOpen] = useState(false);
+  const [csvImporting, setCsvImporting] = useState(false);
+  const [csvImportResult, setCsvImportResult] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+  const csvInputRef = useRef(null);
 
   /** One GA4 sync at a time (any dealer); shows which client_id is running */
   const [ga4SyncingClientId, setGa4SyncingClientId] = useState(null);
@@ -124,11 +305,7 @@ export default function ConfigDealer() {
       for (const r of list) {
         const id = r.client_id;
         if (!id) continue;
-        next[id] = {
-          template_drive_id: r.template_drive_id ?? '',
-          output_file_drive_id: r.output_file_drive_id ?? '',
-          ga4_property_id: r.ga4_property_id != null && r.ga4_property_id !== undefined ? String(r.ga4_property_id) : '',
-        };
+        next[id] = rowToDraft(r);
         if (!isRowComplete(r)) incomplete.add(id);
       }
       setDrafts(next);
@@ -162,6 +339,21 @@ export default function ConfigDealer() {
     return sorted.filter((row) => rowMatchesSearch(row, q));
   }, [sorted, searchQuery]);
 
+  const dealerPageCount = Math.max(1, Math.ceil(filtered.length / DEALERS_PER_PAGE));
+
+  const paginatedDealers = useMemo(() => {
+    const start = (dealerPage - 1) * DEALERS_PER_PAGE;
+    return filtered.slice(start, start + DEALERS_PER_PAGE);
+  }, [filtered, dealerPage]);
+
+  useEffect(() => {
+    setDealerPage(1);
+  }, [searchQuery, activeAgency?.id]);
+
+  useEffect(() => {
+    if (dealerPage > dealerPageCount) setDealerPage(dealerPageCount);
+  }, [dealerPage, dealerPageCount]);
+
   const setField = (clientId, field, value) => {
     setDrafts((prev) => ({
       ...prev,
@@ -172,6 +364,29 @@ export default function ConfigDealer() {
     }));
   };
 
+  const persistDealer = async (clientId, draft, { isCreate = false } = {}) => {
+    if (!supabase || !clientId) return;
+    const payload = buildSavePayload(draft);
+    if (!payload.customer_id) throw new Error('customer_id is required.');
+    if (!payload.descriptive_name) payload.descriptive_name = clientId;
+
+    if (isCreate) {
+      const { error } = await supabase.from(DEALER_TABLE).insert({ client_id: clientId, ...payload });
+      if (error) throw error;
+      const row = { client_id: clientId, ...payload };
+      setRows((prev) => sortRows([...prev, row]));
+      setDrafts((prev) => ({ ...prev, [clientId]: rowToDraft(row) }));
+      linkClientToActiveAgency(clientId);
+    } else {
+      const { error } = await supabase.from(DEALER_TABLE).update(payload).eq('client_id', clientId);
+      if (error) throw error;
+      setRows((prev) =>
+        prev.map((r) => (r.client_id === clientId ? { ...r, ...payload } : r)),
+      );
+      setDrafts((prev) => ({ ...prev, [clientId]: rowToDraft({ client_id: clientId, ...payload }) }));
+    }
+  };
+
   const saveRow = async (clientId) => {
     if (!supabase || !clientId) return;
     const d = drafts[clientId];
@@ -179,25 +394,7 @@ export default function ConfigDealer() {
     setSavingId(clientId);
     setSaveError(null);
     try {
-      const payload = {
-        template_drive_id: d.template_drive_id?.trim() || null,
-        output_file_drive_id: d.output_file_drive_id?.trim() || null,
-        ga4_property_id: d.ga4_property_id?.trim() || null,
-      };
-      const { error } = await supabase.from(DEALER_TABLE).update(payload).eq('client_id', clientId);
-      if (error) throw error;
-      setRows((prev) =>
-        prev.map((r) =>
-          r.client_id === clientId
-            ? {
-                ...r,
-                template_drive_id: payload.template_drive_id,
-                output_file_drive_id: payload.output_file_drive_id,
-                ga4_property_id: payload.ga4_property_id,
-              }
-            : r,
-        ),
-      );
+      await persistDealer(clientId, d);
       setEditingIds((prev) => {
         const n = new Set(prev);
         n.delete(clientId);
@@ -210,20 +407,125 @@ export default function ConfigDealer() {
     }
   };
 
+  const openCreateModal = () => {
+    setDealerModalMode('create');
+    setDealerModalClientId('');
+    setDealerModalForm(emptyDealerDraft());
+    setSaveError(null);
+  };
+
+  const openEditModal = (row) => {
+    const id = row.client_id;
+    if (!id) return;
+    setDealerModalMode('edit');
+    setDealerModalClientId(id);
+    setDealerModalForm(rowToDraft(row));
+    setSaveError(null);
+  };
+
+  const closeDealerModal = () => {
+    setDealerModalMode(null);
+    setDealerModalClientId(null);
+    setDealerModalForm(emptyDealerDraft());
+  };
+
+  const saveDealerModal = async () => {
+    const isCreate = dealerModalMode === 'create';
+    const clientId = isCreate ? trimVal(dealerModalClientId) : dealerModalClientId;
+    if (!clientId) {
+      setSaveError('client_id is required.');
+      return;
+    }
+    if (!/^[a-zA-Z0-9_.-]+$/.test(clientId)) {
+      setSaveError('client_id may only contain letters, numbers, underscore, dot, and hyphen.');
+      return;
+    }
+    setSavingId(clientId);
+    setSaveError(null);
+    try {
+      await persistDealer(clientId, dealerModalForm, { isCreate });
+      closeDealerModal();
+    } catch (e) {
+      setSaveError(e?.message || 'Save failed');
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const deleteDealer = async (clientId) => {
+    if (!supabase || !clientId) return;
+    const row = rows.find((r) => r.client_id === clientId);
+    const label = row?.descriptive_name || clientId;
+    if (!window.confirm(`Delete dealer "${label}" (${clientId})? This cannot be undone.`)) return;
+    setDeletingId(clientId);
+    setSaveError(null);
+    try {
+      const { error } = await supabase.from(DEALER_TABLE).delete().eq('client_id', clientId);
+      if (error) throw error;
+      setRows((prev) => prev.filter((r) => r.client_id !== clientId));
+      setDrafts((prev) => {
+        const next = { ...prev };
+        delete next[clientId];
+        return next;
+      });
+      setEditingIds((prev) => {
+        const n = new Set(prev);
+        n.delete(clientId);
+        return n;
+      });
+      unlinkClientFromAgencyMap(clientId);
+    } catch (e) {
+      setSaveError(e?.message || 'Delete failed');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const runCsvImport = async (file) => {
+    if (!supabase || !file) return;
+    setCsvImporting(true);
+    setCsvImportResult(null);
+    setSaveError(null);
+    try {
+      const text = await file.text();
+      const records = parseDealerCsv(text);
+      let ok = 0;
+      const errors = [];
+      const existingIds = new Set(rows.map((r) => r.client_id).filter(Boolean));
+
+      for (let i = 0; i < records.length; i += 1) {
+        const rec = records[i];
+        const clientId = trimVal(rec.client_id);
+        const rowNum = i + 2;
+        if (!clientId) {
+          errors.push(`Row ${rowNum}: missing client_id`);
+          continue;
+        }
+        try {
+          const isCreate = !existingIds.has(clientId);
+          await persistDealer(clientId, rec, { isCreate });
+          existingIds.add(clientId);
+          ok += 1;
+        } catch (e) {
+          errors.push(`Row ${rowNum} (${clientId}): ${e?.message || String(e)}`);
+        }
+      }
+      setCsvImportResult({ ok, failed: errors.length, errors });
+      if (ok > 0) registerClientIds([...existingIds]);
+    } catch (e) {
+      setSaveError(e?.message || 'CSV import failed');
+    } finally {
+      setCsvImporting(false);
+      if (csvInputRef.current) csvInputRef.current.value = '';
+    }
+  };
+
   const hasDraftChange = (row) => {
     const id = row.client_id;
     if (!id || !drafts[id]) return false;
-    const d = drafts[id];
-    const t = (d.template_drive_id ?? '').trim() || null;
-    const o = (d.output_file_drive_id ?? '').trim() || null;
-    const g = (d.ga4_property_id ?? '').trim() || null;
-    const curT = row.template_drive_id ?? null;
-    const curO = row.output_file_drive_id ?? null;
-    const curG =
-      row.ga4_property_id != null && row.ga4_property_id !== ''
-        ? String(row.ga4_property_id).trim() || null
-        : null;
-    return t !== curT || o !== curO || g !== curG;
+    const saved = buildSavePayload(rowToDraft(row));
+    const draft = buildSavePayload(drafts[id]);
+    return JSON.stringify(saved) !== JSON.stringify(draft);
   };
 
   const openEdit = (clientId) => {
@@ -285,15 +587,7 @@ export default function ConfigDealer() {
   const cancelEdit = (clientId) => {
     const row = rows.find((r) => r.client_id === clientId);
     if (row) {
-      setDrafts((prev) => ({
-        ...prev,
-        [clientId]: {
-          template_drive_id: row.template_drive_id ?? '',
-          output_file_drive_id: row.output_file_drive_id ?? '',
-          ga4_property_id:
-            row.ga4_property_id != null && row.ga4_property_id !== undefined ? String(row.ga4_property_id) : '',
-        },
-      }));
+      setDrafts((prev) => ({ ...prev, [clientId]: rowToDraft(row) }));
     }
     setEditingIds((prev) => {
       const n = new Set(prev);
@@ -461,54 +755,284 @@ export default function ConfigDealer() {
     );
   }
 
-  return (
-    <div className="mx-auto max-w-5xl animate-fade-in-down">
-      <header className="mb-6 flex flex-col gap-4 sm:mb-8 sm:flex-row sm:items-end sm:justify-between">
-        <div className="min-w-0 flex-1">
-          <h1 className="font-display text-3xl font-bold tracking-tight text-primary md:text-4xl">Dealer configuration</h1>
-          <div className="mt-4 rounded-xl border border-[rgba(12,68,124,0.2)] bg-[color:rgba(12,68,124,0.06)] px-4 py-3 text-sm leading-relaxed text-on-surface md:px-5 md:py-4">
-            <p className="font-semibold text-primary">Google Drive — service account (Viewer)</p>
-            <p className="mt-2 text-on-surface-variant">
-              After entering all IDs below, grant <strong className="text-on-surface">Viewer</strong> access on your{' '}
-              <strong className="text-on-surface">template</strong> and <strong className="text-on-surface">output</strong> Drive
-              items to this email so generated data can be read and written as required:
-            </p>
-            <p className="mt-3 break-all font-mono text-xs font-semibold text-primary sm:text-sm">{GA_SERVICE_ACCOUNT_EMAIL}</p>
-          </div>
-          <p className="mt-3 max-w-xl text-sm text-on-surface-variant md:text-base">
-            Two dots (top-right): first = template + output Drive IDs, second = GA4 (green = OK, red = missing). Save closes the
-            card. Use <strong className="text-on-surface">Sync GA4</strong> on each dealer to refresh{' '}
-            <code className="rounded bg-surface-container-high px-1 text-xs">ga4_metrics</code> for that dealer only (save GA4
-            ID first). Only one sync runs at a time.
-          </p>
-          {loadError ? (
-            <p className="mt-3 max-w-xl rounded-lg border border-amber-200/90 bg-amber-50/95 px-3 py-2 text-xs text-amber-950">
-              {loadError}
-            </p>
-          ) : null}
-          {saveError ? (
-            <p className="mt-3 max-w-xl rounded-lg border border-red-200/90 bg-red-50/95 px-3 py-2 text-xs text-red-950">
-              {saveError}
-            </p>
-          ) : null}
-        </div>
-        <button
-          type="button"
-          onClick={() => void load()}
-          disabled={loading}
-          className="shrink-0 rounded-xl border border-[rgba(194,198,209,0.45)] bg-surface-container-lowest px-5 py-2.5 text-sm font-semibold text-primary shadow-ambient transition-colors hover:bg-surface-container-high disabled:opacity-50"
+  const dealerModal =
+    dealerModalMode &&
+    createPortal(
+      <div
+        className="fixed inset-0 z-[200] flex items-center justify-center bg-[rgba(18,22,30,0.5)] p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dealer-modal-title"
+        onClick={closeDealerModal}
+      >
+        <div
+          className="max-h-[min(90vh,720px)] w-full max-w-lg overflow-y-auto rounded-2xl bg-surface-container-lowest p-6 shadow-ambient"
+          onClick={(e) => e.stopPropagation()}
         >
-          {loading ? 'Loading…' : 'Refresh'}
-        </button>
+          <h2 id="dealer-modal-title" className="font-display text-xl font-bold text-primary">
+            {dealerModalMode === 'create' ? 'Add dealer' : 'Edit dealer'}
+          </h2>
+          <div className="mt-4 space-y-4">
+            {dealerModalMode === 'create' ? (
+              <div>
+                <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                  client_id *
+                </label>
+                <input
+                  type="text"
+                  value={dealerModalClientId}
+                  onChange={(e) => setDealerModalClientId(e.target.value)}
+                  autoComplete="off"
+                  className="w-full rounded-xl border-0 bg-surface-container-high px-3 py-2.5 font-mono text-sm text-on-surface outline-none ring-0 focus:ring-2 focus:ring-primary/25"
+                  placeholder="e.g. zoomers_rv"
+                />
+              </div>
+            ) : (
+              <p className="font-mono text-xs text-on-surface-variant">
+                client_id: <span className="text-on-surface">{dealerModalClientId}</span>
+              </p>
+            )}
+            <div>
+              <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                descriptive_name *
+              </label>
+              <input
+                type="text"
+                value={dealerModalForm.descriptive_name}
+                onChange={(e) => setDealerModalForm((f) => ({ ...f, descriptive_name: e.target.value }))}
+                className="w-full rounded-xl border-0 bg-surface-container-high px-3 py-2.5 text-sm text-on-surface outline-none ring-0 focus:ring-2 focus:ring-primary/25"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                customer_id *
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={dealerModalForm.customer_id}
+                onChange={(e) =>
+                  setDealerModalForm((f) => ({ ...f, customer_id: e.target.value.replace(/\D/g, '') }))
+                }
+                className="w-full rounded-xl border-0 bg-surface-container-high px-3 py-2.5 font-mono text-sm text-on-surface outline-none ring-0 focus:ring-2 focus:ring-primary/25"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                template_drive_id
+              </label>
+              <input
+                type="text"
+                value={dealerModalForm.template_drive_id}
+                onChange={(e) => setDealerModalForm((f) => ({ ...f, template_drive_id: e.target.value }))}
+                className="w-full rounded-xl border-0 bg-surface-container-high px-3 py-2.5 font-mono text-sm text-on-surface outline-none ring-0 focus:ring-2 focus:ring-primary/25"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                output_file_drive_id
+              </label>
+              <input
+                type="text"
+                value={dealerModalForm.output_file_drive_id}
+                onChange={(e) => setDealerModalForm((f) => ({ ...f, output_file_drive_id: e.target.value }))}
+                className="w-full rounded-xl border-0 bg-surface-container-high px-3 py-2.5 font-mono text-sm text-on-surface outline-none ring-0 focus:ring-2 focus:ring-primary/25"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                ga4_property_id
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={dealerModalForm.ga4_property_id}
+                onChange={(e) =>
+                  setDealerModalForm((f) => ({ ...f, ga4_property_id: e.target.value.replace(/\D/g, '') }))
+                }
+                className="w-full rounded-xl border-0 bg-surface-container-high px-3 py-2.5 font-mono text-sm text-on-surface outline-none ring-0 focus:ring-2 focus:ring-primary/25"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                login_customer_id
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={dealerModalForm.login_customer_id}
+                onChange={(e) =>
+                  setDealerModalForm((f) => ({ ...f, login_customer_id: e.target.value.replace(/\D/g, '') }))
+                }
+                className="w-full rounded-xl border-0 bg-surface-container-high px-3 py-2.5 font-mono text-sm text-on-surface outline-none ring-0 focus:ring-2 focus:ring-primary/25"
+              />
+            </div>
+          </div>
+          <div className="mt-6 flex flex-wrap justify-end gap-2">
+            <button
+              type="button"
+              onClick={closeDealerModal}
+              disabled={Boolean(savingId)}
+              className="rounded-xl border border-[rgba(194,198,209,0.45)] bg-surface-container-lowest px-5 py-2.5 text-sm font-semibold text-primary hover:bg-surface-container-high disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void saveDealerModal()}
+              disabled={Boolean(savingId)}
+              className="rounded-xl px-6 py-2.5 text-sm font-semibold text-on-primary shadow-ambient hover:brightness-105 disabled:opacity-50"
+              style={{ background: 'linear-gradient(135deg, #002E59 0%, #0C447C 100%)' }}
+            >
+              {savingId ? 'Saving…' : dealerModalMode === 'create' ? 'Create dealer' : 'Save changes'}
+            </button>
+          </div>
+        </div>
+      </div>,
+      document.body,
+    );
+
+  return (
+    <div className="w-full animate-fade-in-down">
+      <header className="mb-6 w-full sm:mb-8">
+        <h1 className="font-display text-3xl font-bold tracking-tight text-primary md:text-4xl">Dealer configuration</h1>
+        <div className="mt-4 w-full rounded-xl border border-[rgba(12,68,124,0.2)] bg-[color:rgba(12,68,124,0.06)] px-4 py-3 text-sm leading-relaxed text-on-surface md:px-5 md:py-4">
+          <p className="font-semibold text-primary">Google Drive — service account (Viewer)</p>
+          <p className="mt-2 text-on-surface-variant">
+            After entering all IDs below, grant <strong className="text-on-surface">Viewer</strong> access on your{' '}
+            <strong className="text-on-surface">template</strong> and <strong className="text-on-surface">output</strong> Drive
+            items to this email so generated data can be read and written as required:
+          </p>
+          <p className="mt-3 break-all font-mono text-xs font-semibold text-primary sm:text-sm">{GA_SERVICE_ACCOUNT_EMAIL}</p>
+        </div>
+        <p className="mt-3 w-full text-sm text-on-surface-variant md:text-base">
+          Two dots (top-right): first = template + output Drive IDs, second = GA4 (green = OK, red = missing). Save closes the
+          card. Use <strong className="text-on-surface">Sync GA4</strong> on each dealer to refresh{' '}
+          <code className="rounded bg-surface-container-high px-1 text-xs">ga4_metrics</code> for that dealer only (save GA4 ID
+          first). Only one sync runs at a time. Dealers are listed {DEALERS_PER_PAGE} per page.
+        </p>
+        {loadError ? (
+          <p className="mt-3 w-full rounded-lg border border-amber-200/90 bg-amber-50/95 px-3 py-2 text-xs text-amber-950">
+            {loadError}
+          </p>
+        ) : null}
+        {saveError ? (
+          <p className="mt-3 w-full rounded-lg border border-red-200/90 bg-red-50/95 px-3 py-2 text-xs text-red-950">
+            {saveError}
+          </p>
+        ) : null}
+        <div className="mt-5 flex w-full flex-wrap gap-2 border-t border-[rgba(194,198,209,0.25)] pt-5">
+          <button
+            type="button"
+            onClick={openCreateModal}
+            className="rounded-xl px-5 py-2.5 text-sm font-semibold text-on-primary shadow-ambient transition-[filter] hover:brightness-105"
+            style={{ background: 'linear-gradient(135deg, #002E59 0%, #0C447C 100%)' }}
+          >
+            Add dealer
+          </button>
+          <button
+            type="button"
+            onClick={() => setCsvPanelOpen((v) => !v)}
+            className="rounded-xl border border-[rgba(194,198,209,0.45)] bg-surface-container-lowest px-5 py-2.5 text-sm font-semibold text-primary shadow-ambient transition-colors hover:bg-surface-container-high"
+          >
+            {csvPanelOpen ? 'Hide CSV import' : 'Import CSV'}
+          </button>
+          <a
+            href={DEALER_SAMPLE_CSV_URL}
+            download="dealer_import_sample.csv"
+            className="rounded-xl border border-[rgba(194,198,209,0.45)] bg-surface-container-lowest px-5 py-2.5 text-sm font-semibold text-primary shadow-ambient transition-colors hover:bg-surface-container-high"
+          >
+            Download sample
+          </a>
+          <button
+            type="button"
+            onClick={() => void load()}
+            disabled={loading}
+            className="rounded-xl border border-[rgba(194,198,209,0.45)] bg-surface-container-lowest px-5 py-2.5 text-sm font-semibold text-primary shadow-ambient transition-colors hover:bg-surface-container-high disabled:opacity-50"
+          >
+            {loading ? 'Loading…' : 'Refresh'}
+          </button>
+        </div>
       </header>
+
+      {csvPanelOpen ? (
+        <section className="mb-6 rounded-2xl border border-[rgba(194,198,209,0.35)] bg-surface-container-lowest p-5 shadow-ambient md:p-6">
+          <h2 className="font-display text-lg font-bold text-primary">Bulk import (CSV)</h2>
+          <p className="mt-2 text-sm text-on-surface-variant">
+            Use the same columns as the sample file (Excel can save as CSV). Existing <code className="rounded bg-surface-container-high px-1 text-xs">client_id</code> rows are updated; new IDs are inserted and linked to the current agency.
+          </p>
+          <div className="mt-4 overflow-x-auto rounded-xl border border-[rgba(194,198,209,0.25)]">
+            <table className="w-full min-w-[640px] border-collapse text-left text-xs">
+              <thead className="bg-surface-container-high/80">
+                <tr>
+                  {DEALER_CSV_COLUMNS.map((col) => (
+                    <th key={col.key} className="px-3 py-2 font-semibold text-primary">
+                      {col.label}
+                      {col.required ? <span className="text-red-600"> *</span> : null}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-t border-[rgba(194,198,209,0.2)] text-on-surface-variant">
+                  {DEALER_CSV_COLUMNS.map((col) => (
+                    <td key={col.key} className="px-3 py-2">
+                      {col.hint}
+                    </td>
+                  ))}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <input
+              ref={csvInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              disabled={csvImporting}
+              className="text-sm text-on-surface file:mr-3 file:rounded-lg file:border-0 file:bg-primary file:px-4 file:py-2 file:text-sm file:font-semibold file:text-on-primary"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void runCsvImport(f);
+              }}
+            />
+            {csvImporting ? <span className="text-sm text-on-surface-variant">Importing…</span> : null}
+          </div>
+          {csvImportResult ? (
+            <div
+              className={`mt-4 rounded-lg px-3 py-2 text-sm ${
+                csvImportResult.failed
+                  ? 'border border-amber-200/90 bg-amber-50/95 text-amber-950'
+                  : 'border border-emerald-200/90 bg-emerald-50/95 text-emerald-950'
+              }`}
+            >
+              <p>
+                Imported <strong>{csvImportResult.ok}</strong> row{csvImportResult.ok === 1 ? '' : 's'}
+                {csvImportResult.failed ? (
+                  <>
+                    ; <strong>{csvImportResult.failed}</strong> failed
+                  </>
+                ) : null}
+                .
+              </p>
+              {csvImportResult.errors?.length ? (
+                <ul className="mt-2 max-h-32 list-inside list-disc overflow-y-auto text-xs">
+                  {csvImportResult.errors.map((err) => (
+                    <li key={err}>{err}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       <div className="rounded-2xl bg-surface-container-lowest p-6 shadow-ambient md:p-8">
         {loading && rows.length === 0 ? (
           <p className="text-sm text-on-surface-variant">Loading dealers…</p>
         ) : rows.length === 0 ? (
           <p className="text-sm text-on-surface-variant">
-            No rows in <code className="rounded bg-surface-container-high px-1">{DEALER_TABLE}</code>. Add accounts in Supabase
-            first, then set Drive and GA4 IDs here.
+            No dealers yet. Use <strong className="text-on-surface">Add dealer</strong> or <strong className="text-on-surface">Import CSV</strong> above.
           </p>
         ) : sorted.length === 0 ? (
           <p className="text-sm text-on-surface-variant">
@@ -537,11 +1061,17 @@ export default function ConfigDealer() {
                   autoComplete="off"
                 />
               </div>
-              {searchQuery.trim() ? (
-                <p className="mt-2 text-xs text-on-surface-variant">
-                  Showing {filtered.length} of {sorted.length} dealer{sorted.length === 1 ? '' : 's'}
-                </p>
-              ) : null}
+              <p className="mt-2 text-xs text-on-surface-variant">
+                {searchQuery.trim()
+                  ? `Showing ${filtered.length} of ${sorted.length} dealer${sorted.length === 1 ? '' : 's'}`
+                  : `${filtered.length} dealer${filtered.length === 1 ? '' : 's'} total`}
+                {filtered.length > DEALERS_PER_PAGE ? (
+                  <>
+                    {' '}
+                    · page {dealerPage} of {dealerPageCount}
+                  </>
+                ) : null}
+              </p>
             </div>
 
             <ul className="space-y-6">
@@ -550,10 +1080,10 @@ export default function ConfigDealer() {
                   No dealers match your search.
                 </li>
               ) : (
-                filtered.map((row) => {
+                paginatedDealers.map((row) => {
                   const id = row.client_id;
                   if (!id) return null;
-                  const d = drafts[id] || { template_drive_id: '', output_file_drive_id: '', ga4_property_id: '' };
+                  const d = drafts[id] || emptyDealerDraft();
                   const dirty = hasDraftChange(row);
                   const isEditing = editingIds.has(id);
                   const tOk = Boolean(trimVal(isEditing ? d.template_drive_id : row.template_drive_id));
@@ -607,19 +1137,63 @@ export default function ConfigDealer() {
                           </div>
                           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                             {renderGa4SyncRow(id, gOk)}
-                            <div className="flex shrink-0 justify-end sm:pt-0">
+                            <div className="flex shrink-0 flex-wrap justify-end gap-2 sm:pt-0">
                               <button
                                 type="button"
                                 onClick={() => openEdit(id)}
                                 className="rounded-xl border border-[rgba(194,198,209,0.45)] bg-surface-container-lowest px-5 py-2.5 text-sm font-semibold text-primary shadow-ambient transition-colors hover:bg-surface-container-high"
                               >
-                                Edit
+                                Configure
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => openEditModal(row)}
+                                className="rounded-xl border border-[rgba(194,198,209,0.45)] bg-surface-container-lowest px-5 py-2.5 text-sm font-semibold text-primary shadow-ambient transition-colors hover:bg-surface-container-high"
+                              >
+                                Edit dealer
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void deleteDealer(id)}
+                                disabled={deletingId === id}
+                                className="rounded-xl border border-red-200/80 bg-red-50/90 px-5 py-2.5 text-sm font-semibold text-red-900 transition-colors hover:bg-red-100 disabled:opacity-50"
+                              >
+                                {deletingId === id ? 'Deleting…' : 'Delete'}
                               </button>
                             </div>
                           </div>
                         </div>
                       ) : (
                         <>
+                          <div className="mt-4 grid gap-4 md:grid-cols-2">
+                            <div>
+                              <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                                descriptive_name
+                              </label>
+                              <input
+                                type="text"
+                                value={d.descriptive_name}
+                                onChange={(e) => setField(id, 'descriptive_name', e.target.value)}
+                                autoComplete="off"
+                                className="w-full rounded-xl border-0 bg-surface-container-high px-3 py-2.5 text-sm text-on-surface outline-none ring-0 transition-[box-shadow] focus:ring-2 focus:ring-primary/25"
+                                placeholder="Dealer display name"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                                customer_id
+                              </label>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={d.customer_id}
+                                onChange={(e) => setField(id, 'customer_id', e.target.value.replace(/\D/g, ''))}
+                                autoComplete="off"
+                                className="w-full rounded-xl border-0 bg-surface-container-high px-3 py-2.5 font-mono text-sm text-on-surface outline-none ring-0 transition-[box-shadow] focus:ring-2 focus:ring-primary/25"
+                                placeholder="Google Ads customer ID"
+                              />
+                            </div>
+                          </div>
                           <div className="mt-4 grid gap-4 md:grid-cols-3">
                             <div>
                               <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
@@ -662,9 +1236,31 @@ export default function ConfigDealer() {
                               />
                             </div>
                           </div>
+                          <div className="mt-4">
+                            <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                              login_customer_id (optional)
+                            </label>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              value={d.login_customer_id}
+                              onChange={(e) => setField(id, 'login_customer_id', e.target.value.replace(/\D/g, ''))}
+                              autoComplete="off"
+                              className="w-full max-w-md rounded-xl border-0 bg-surface-container-high px-3 py-2.5 font-mono text-sm text-on-surface outline-none ring-0 transition-[box-shadow] focus:ring-2 focus:ring-primary/25"
+                              placeholder="MCC customer ID"
+                            />
+                          </div>
                           <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                             {renderGa4SyncRow(id, Boolean(trimVal(row.ga4_property_id)))}
                             <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => void deleteDealer(id)}
+                                disabled={deletingId === id || savingId === id}
+                                className="rounded-xl border border-red-200/80 bg-red-50/90 px-5 py-2.5 text-sm font-semibold text-red-900 transition-colors hover:bg-red-100 disabled:opacity-50"
+                              >
+                                {deletingId === id ? 'Deleting…' : 'Delete'}
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => cancelEdit(id)}
@@ -691,9 +1287,45 @@ export default function ConfigDealer() {
                 })
               )}
             </ul>
+
+            {filtered.length > DEALERS_PER_PAGE ? (
+              <nav
+                className="mt-8 flex flex-wrap items-center justify-between gap-3 border-t border-[rgba(194,198,209,0.25)] pt-6"
+                aria-label="Dealer list pagination"
+              >
+                <p className="text-sm text-on-surface-variant">
+                  Page {dealerPage} of {dealerPageCount}
+                  <span className="text-on-surface-variant/80">
+                    {' '}
+                    ({(dealerPage - 1) * DEALERS_PER_PAGE + 1}–{Math.min(dealerPage * DEALERS_PER_PAGE, filtered.length)} of{' '}
+                    {filtered.length})
+                  </span>
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDealerPage((p) => Math.max(1, p - 1))}
+                    disabled={dealerPage <= 1}
+                    className="rounded-xl border border-[rgba(194,198,209,0.45)] bg-surface-container-lowest px-4 py-2 text-sm font-semibold text-primary transition-colors hover:bg-surface-container-high disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDealerPage((p) => Math.min(dealerPageCount, p + 1))}
+                    disabled={dealerPage >= dealerPageCount}
+                    className="rounded-xl border border-[rgba(194,198,209,0.45)] bg-surface-container-lowest px-4 py-2 text-sm font-semibold text-primary transition-colors hover:bg-surface-container-high disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    Next
+                  </button>
+                </div>
+              </nav>
+            ) : null}
           </>
         )}
       </div>
+
+      {dealerModal}
     </div>
   );
 }

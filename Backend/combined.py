@@ -547,7 +547,7 @@ def build_full_data(customer_id, start_date, end_date, ga4_property_id=None, cus
     return data
 
 if __name__ == '__main__':
-    TEST_CUSTOMER_ID = 2360685226
+    TEST_CUSTOMER_ID = 5691491477
     START_DATE = '2026-03-01'
     END_DATE = '2026-03-31' 
     

@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from supabase import create_client, Client
 from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
@@ -17,15 +18,20 @@ if not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- 2. GOOGLE ADS SETUP ---
-client = GoogleAdsClient.load_from_storage("google-ads.yml")
+client = GoogleAdsClient.load_from_storage("google-ads.yaml")
+
+# SAFETY FIX: Save the default manager ID from your YAML file so we can switch back to it safely!
+DEFAULT_LOGIN_CUSTOMER_ID = getattr(client, 'login_customer_id', None)
+
 
 def sync_google_ads_data(client, customer_id, db_client_id):
     ga_service = client.get_service("GoogleAdsService")
 
     START_DATE = '2026-01-01'
-    END_DATE = '2026-04-21'
+    # Automatically get today's date formatted as YYYY-MM-DD
+    END_DATE = datetime.now().strftime('%Y-%m-%d') 
 
-    # THE FIX: Added the 'advertising_channel_type' filter to match your UI screenshot perfectly!
+    # Added the 'advertising_channel_type' filter to match your UI screenshot perfectly
     query = f"""
         SELECT
           segments.date,
@@ -93,7 +99,8 @@ def sync_google_ads_data(client, customer_id, db_client_id):
 def run_all_accounts():
     print("Fetching accounts from Supabase...")
     
-    response = supabase.table('google_ads_accounts').select('client_id, customer_id, descriptive_name').execute()
+    # Grab the accounts along with the new login_customer_id column
+    response = supabase.table('google_ads_accounts').select('client_id, customer_id, descriptive_name, login_customer_id').execute()
     accounts = response.data
 
     if not accounts:
@@ -107,14 +114,27 @@ def run_all_accounts():
         db_client_id = str(account['client_id'])
         client_name = account.get('descriptive_name', 'Unknown')
         
+        # Grab the manager ID from the database row
+        manager_id = account.get('login_customer_id')
+        
         print(f"--- Processing: {client_name} (ID: {raw_customer_id}) ---")
         
         try:
+            # Dynamically inject the Manager ID into the Google Ads Client
+            if manager_id and str(manager_id).strip():
+                clean_manager_id = str(manager_id).replace("-", "").strip()
+                client.login_customer_id = clean_manager_id
+            else:
+                # Re-apply the default YAML manager ID to prevent old overrides from sticking
+                client.login_customer_id = DEFAULT_LOGIN_CUSTOMER_ID
+                
             sync_google_ads_data(client, raw_customer_id, db_client_id)
+            
         except GoogleAdsException as ex:
             print(f"  -> Google Ads API Error for {raw_customer_id}: {ex.failure.errors[0].message}")
         except Exception as e:
             print(f"  -> Unexpected error for {raw_customer_id}: {e}")
+
 
 if __name__ == "__main__":
     run_all_accounts()

@@ -15,14 +15,9 @@ BASE_DIR         = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
 CREDENTIALS_FILE = str(BASE_DIR / "ga4-credentials.json")
-# print(f"DEBUG: I am actually using this exact file: {CREDENTIALS_FILE}")
 
-# Force the script to ignore the .env and ONLY use the perfect GA4 file
-
-# print(f"DEBUG: I am now using this file: {CREDENTIALS_FILE}")
-
-MASTER_TABLE     = os.environ.get("SUPABASE_CLIENT_TABLE", "google_ads_accounts")
-METRICS_TABLE    = "ga4_raw_metrics"
+# THE FIX: Updated to your new table name
+METRICS_TABLE    = "smart_ga4_data"
 
 
 def get_supabase():
@@ -42,18 +37,6 @@ def get_ga4_client():
     return BetaAnalyticsDataClient.from_service_account_file(CREDENTIALS_FILE)
 
 
-def fetch_ga4_accounts(sb, client_id: Optional[str] = None):
-    """
-    Fetches accounts from the master table.
-    If client_id is set, only that row (for per-dealer sync from the UI).
-    """
-    q = sb.table(MASTER_TABLE).select("id, client_id, ga4_property_id, descriptive_name")
-    if client_id and str(client_id).strip():
-        q = q.eq("client_id", str(client_id).strip())
-    res = q.execute()
-    return res.data or []
-
-
 def build_ga4_request(property_id: str) -> RunReportRequest:
     return RunReportRequest(
         property=property_id,
@@ -64,6 +47,10 @@ def build_ga4_request(property_id: str) -> RunReportRequest:
             Dimension(name="pageTitle"),
             Dimension(name="sessionCampaignName"),
             Dimension(name="sessionDefaultChannelGroup"),
+            # THE FIX: Added Source and Medium dimensions
+            Dimension(name="sessionSource"),
+            Dimension(name="sessionMedium"),
+            Dimension(name="sessionSourceMedium"),
         ],
         metrics=[
             Metric(name="screenPageViews"),
@@ -71,7 +58,8 @@ def build_ga4_request(property_id: str) -> RunReportRequest:
             Metric(name="sessions"),
             Metric(name="newUsers"),
         ],
-        date_ranges=[DateRange(start_date="30daysAgo", end_date="today")],
+        # THE FIX: Hardcoded date range as requested
+        date_ranges=[DateRange(start_date="2026-01-01", end_date="today")],
     )
 
 
@@ -81,7 +69,6 @@ def parse_ga4_rows(response, account: dict) -> list:
     account_name      = account.get("descriptive_name", client_id)
     clean_property_id = str(raw_property_id).replace("properties/", "")
 
-    # THE FIX: A dictionary to combine duplicates before hitting Supabase
     aggregated_data = {}
 
     for row in response.rows:
@@ -95,9 +82,14 @@ def parse_ga4_rows(response, account: dict) -> list:
         page_title     = dv[3].value
         session_camp   = dv[4].value
         channel        = dv[5].value.lower().replace(" ", "_").replace("/", "_")
+        
+        # Extract new dimensions
+        source         = dv[6].value
+        medium         = dv[7].value
+        source_medium  = dv[8].value
 
-        # This key matches your Supabase UNIQUE constraint perfectly
-        unique_key = (client_id, clean_property_id, formatted_date, page_path, channel)
+        # THE FIX: Added source and medium to the unique key for perfect deduplication
+        unique_key = (client_id, clean_property_id, formatted_date, page_path, channel, source, medium)
 
         views       = int(mv[0].value)
         total_users = int(mv[1].value)
@@ -105,30 +97,30 @@ def parse_ga4_rows(response, account: dict) -> list:
         new_users   = int(mv[3].value)
 
         if unique_key in aggregated_data:
-            # If we already have this row, ADD the metrics together
             aggregated_data[unique_key]["views"]       += views
             aggregated_data[unique_key]["total_users"] += total_users
             aggregated_data[unique_key]["sessions"]    += sessions
             aggregated_data[unique_key]["new_users"]   += new_users
         else:
-            # If it's a new row, create it
             aggregated_data[unique_key] = {
                 "client_id":            client_id,
                 "ga4_property_id":      clean_property_id,
                 "account_name":         account_name,
                 "report_date":          formatted_date,
-                "page_location":        page_location,  # Keeps the first URL variant seen
+                "page_location":        page_location,
                 "page_path":            page_path,
-                "page_title":           page_title,     # Keeps the first Title seen
-                "session_campaign":     session_camp,   # Keeps the first Campaign seen
+                "page_title":           page_title,
+                "session_campaign":     session_camp,
                 "channel":              channel,
+                "source":               source,
+                "medium":               medium,
+                "source_medium":        source_medium,
                 "views":                views,
                 "total_users":          total_users,
                 "sessions":             sessions,
                 "new_users":            new_users,
             }
 
-    # Convert the clean, deduplicated dictionary back into a list for Supabase
     return list(aggregated_data.values())
 
 
@@ -137,7 +129,8 @@ def push_to_supabase(sb, rows: list, batch_size: int = 1000, log_fn: Optional[Ca
         chunk = rows[i : i + batch_size]
         sb.table(METRICS_TABLE).upsert(
             chunk,
-            on_conflict="client_id,ga4_property_id,report_date,page_path,channel",
+            # THE FIX: Match the unique constraint from the SQL table
+            on_conflict="client_id,ga4_property_id,report_date,page_path,channel,source,medium",
         ).execute()
     msg = f"  Pushed {len(rows)} rows to '{METRICS_TABLE}'"
     print(msg)
@@ -149,11 +142,6 @@ def sync_ga4_data(
     log_callback: Optional[Callable[[str], None]] = None,
     client_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """
-    Pull GA4 into Supabase (ga4_raw_metrics). Optional log_callback receives each log line (also printed).
-    If client_id is set, only that dealer row is synced (one-by-one from Dealer configuration).
-    Returns summary counts for API/UI.
-    """
 
     def emit(msg: str) -> None:
         print(msg)
@@ -163,13 +151,16 @@ def sync_ga4_data(
     sb = get_supabase()
     ga4_client = get_ga4_client()
 
-    cid = str(client_id).strip() if client_id else None
-    accounts = fetch_ga4_accounts(sb, client_id=cid)
-    scope = f"client_id={cid!r}" if cid else "all accounts"
-    emit(f"\n=== STARTING GA4 SYNC ({scope}) — {len(accounts)} row(s) ===\n")
-
-    if cid and len(accounts) == 0:
-        raise ValueError(f"No dealer row in '{MASTER_TABLE}' for client_id={cid!r}.")
+    # THE FIX: Hardcoded bypass for the specific account you requested
+    accounts = [
+        {
+            "client_id": "5691491477",
+            "ga4_property_id": "394545160",
+            "descriptive_name": "Hardcoded GA4 Client"
+        }
+    ]
+    
+    emit(f"\n=== STARTING GA4 SYNC (Hardcoded Account) — {len(accounts)} row(s) ===\n")
 
     success_count = 0
     fail_count = 0
@@ -180,11 +171,6 @@ def sync_ga4_data(
         client_id = account.get("client_id")
         raw_property_id = account.get("ga4_property_id")
         account_name = account.get("descriptive_name", client_id)
-
-        if not raw_property_id or str(raw_property_id).strip() == "":
-            emit(f"Skipping '{account_name}': Missing ga4_property_id.")
-            skipped_no_property += 1
-            continue
 
         property_id = str(raw_property_id).strip()
         if not property_id.startswith("properties/"):
@@ -213,9 +199,7 @@ def sync_ga4_data(
     emit("\n=== GA4 SYNC COMPLETE ===")
     emit(f"  Success : {success_count}")
     emit(f"  Failed  : {fail_count}")
-    emit(f"  Skipped (no property id) : {skipped_no_property}")
-    emit(f"  No GA4 rows (empty response) : {no_rows}")
-    emit(f"  Total accounts in table : {len(accounts)}\n")
+    emit(f"  No GA4 rows (empty response) : {no_rows}\n")
 
     return {
         "success_count": success_count,
@@ -223,7 +207,7 @@ def sync_ga4_data(
         "skipped_no_property": skipped_no_property,
         "no_rows": no_rows,
         "accounts_total": len(accounts),
-        "client_id": cid,
+        "client_id": client_id,
     }
 
 

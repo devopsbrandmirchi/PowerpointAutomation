@@ -1,19 +1,33 @@
 /**
- * Base URL for the FastAPI backend.
- * By returning a relative path ('/api'), the browser treats the request as secure.
- * Vercel will then intercept this and secretly proxy it to your insecure DigitalOcean HTTP server.
+ * Base URL for the FastAPI backend (no trailing slash).
+ * - Local: set VITE_API_URL=http://127.0.0.1:8000 in .env.development, or rely on Vite /api proxy.
+ * - Vercel: leave unset so requests use /api (rewritten in vercel.json to your API host).
  */
 export function getApiBase() {
+  const env = (import.meta.env.VITE_API_URL || '').trim();
+  if (env) return env.replace(/\/$/, '');
   return '/api';
+}
+
+async function parseJsonResponse(res, fallbackLabel) {
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(text || `${fallbackLabel} (${res.status})`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    const hint =
+      text.trimStart().startsWith('<!') || text.trimStart().startsWith('<')
+        ? 'Got HTML instead of JSON — FastAPI is probably not reachable. Local: run uvicorn on :8000 and set VITE_API_URL=http://127.0.0.1:8000 (or use the Vite /api proxy).'
+        : 'Response was not valid JSON.';
+    throw new Error(hint);
+  }
 }
 
 export async function fetchClients() {
   const res = await fetch(`${getApiBase()}/clients`);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `Failed to load clients (${res.status})`);
-  }
-  return res.json();
+  return parseJsonResponse(res, 'Failed to load clients');
 }
 
 /**

@@ -202,6 +202,27 @@ export function AgencyProvider({ children }) {
     });
   }, [selection.agencyId]);
 
+  const linkClientToActiveAgency = useCallback(
+    (clientKey) => {
+      if (clientKey == null || clientKey === '') return;
+      const k = String(clientKey);
+      lastClientIdsRef.current = [...new Set([...lastClientIdsRef.current, k])];
+      setClientAgencyMapState((prev) => ({ ...prev, [k]: selection.agencyId }));
+    },
+    [selection.agencyId],
+  );
+
+  const unlinkClientFromAgencyMap = useCallback((clientKey) => {
+    if (clientKey == null || clientKey === '') return;
+    const k = String(clientKey);
+    setClientAgencyMapState((prev) => {
+      if (!(k in prev)) return prev;
+      const next = { ...prev };
+      delete next[k];
+      return next;
+    });
+  }, []);
+
   const clientBelongsToActiveAgency = useCallback(
     (clientKey) => {
       if (clientKey == null || clientKey === '') return false;
@@ -227,6 +248,8 @@ export function AgencyProvider({ children }) {
       createAgency,
       registerClientIds,
       assignAllKnownClientsToCurrentAgency,
+      linkClientToActiveAgency,
+      unlinkClientFromAgencyMap,
       clientBelongsToActiveAgency,
     }),
     [
@@ -243,6 +266,8 @@ export function AgencyProvider({ children }) {
       createAgency,
       registerClientIds,
       assignAllKnownClientsToCurrentAgency,
+      linkClientToActiveAgency,
+      unlinkClientFromAgencyMap,
       clientBelongsToActiveAgency,
     ],
   );
