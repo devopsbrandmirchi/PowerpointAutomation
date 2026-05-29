@@ -271,7 +271,7 @@ def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
     property_id = _normalize_ga4_property_id(ga4_property_id) or resolve_ga4_property_id(customer_id, ga4_property_id)
     if not property_id:
         print(f"Warning: No GA4 Property ID in DB for customer {customer_id} — using Supabase ga4_metrics.")
-        return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, result)
+        return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, None)
 
     request_channels = RunReportRequest(
         property=f"properties/{property_id}",
@@ -302,8 +302,8 @@ def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
         response_channels = ga4_client.run_report(request_channels)
         response_totals = ga4_client.run_report(request_totals)
     except Exception as e:
-        print(f"GA4 API Live Fetch Error: {e}")
-        return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, result)
+        print(f"GA4 API Live Fetch Error for customer {customer_id}: {e} — using Supabase ga4_metrics.")
+        return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, None)
 
     channel_map = {
         'Paid Search': 'ga4_paid',
@@ -354,6 +354,23 @@ def _ga4_bucket_empty():
     }
 
 
+def _ensure_supabase_bucket(bucket):
+    """Buckets from fetch_ga4_live lack _bounce_weighted; normalize before Supabase aggregation."""
+    base = _ga4_bucket_empty()
+    if not isinstance(bucket, dict):
+        return base.copy()
+    out = base.copy()
+    for key in (
+        'vdp_views', 'sessions', 'users', 'button_interactions', 'form_fills',
+        'bounce_rate', 'avg_session_duration',
+    ):
+        if key in bucket and bucket[key] is not None:
+            out[key] = bucket[key]
+    out['_bounce_weighted'] = float(bucket.get('_bounce_weighted') or 0)
+    out['_duration_weighted'] = float(bucket.get('_duration_weighted') or 0)
+    return out
+
+
 def _accumulate_ga4_supabase_row(bucket, row):
     """Sum counts; session-weight bounce/duration (daily rows must not be summed raw)."""
     sessions = int(row.get('sessions') or 0)
@@ -364,26 +381,34 @@ def _accumulate_ga4_supabase_row(bucket, row):
     bucket['users'] += int(row.get('users') or 0)
     bucket['button_interactions'] += int(row.get('button_interactions') or 0)
     bucket['form_fills'] += int(row.get('form_fills') or 0)
-    bucket['_bounce_weighted'] += bounce * sessions
-    bucket['_duration_weighted'] += duration * sessions
+    bucket['_bounce_weighted'] = bucket.get('_bounce_weighted', 0.0) + bounce * sessions
+    bucket['_duration_weighted'] = bucket.get('_duration_weighted', 0.0) + duration * sessions
 
 
 def _finalize_ga4_supabase_bucket(bucket):
     sessions = bucket['sessions']
     if sessions > 0:
-        bucket['bounce_rate'] = bucket['_bounce_weighted'] / sessions
-        bucket['avg_session_duration'] = bucket['_duration_weighted'] / sessions
+        bucket['bounce_rate'] = bucket.get('_bounce_weighted', 0.0) / sessions
+        bucket['avg_session_duration'] = bucket.get('_duration_weighted', 0.0) / sessions
     bucket.pop('_bounce_weighted', None)
     bucket.pop('_duration_weighted', None)
 
 
 def _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, seed_result=None):
-    result = seed_result or {
-        'ga4_paid': _ga4_bucket_empty(),
-        'ga4_org': _ga4_bucket_empty(),
-        'ga4_cross': _ga4_bucket_empty(),
-        'ga4_total': _ga4_bucket_empty(),
-    }
+    if seed_result:
+        result = {
+            'ga4_paid': _ensure_supabase_bucket(seed_result.get('ga4_paid')),
+            'ga4_org': _ensure_supabase_bucket(seed_result.get('ga4_org')),
+            'ga4_cross': _ensure_supabase_bucket(seed_result.get('ga4_cross')),
+            'ga4_total': _ensure_supabase_bucket(seed_result.get('ga4_total')),
+        }
+    else:
+        result = {
+            'ga4_paid': _ga4_bucket_empty(),
+            'ga4_org': _ga4_bucket_empty(),
+            'ga4_cross': _ga4_bucket_empty(),
+            'ga4_total': _ga4_bucket_empty(),
+        }
 
     try:
         rows = fetch_supabase_paginated(
