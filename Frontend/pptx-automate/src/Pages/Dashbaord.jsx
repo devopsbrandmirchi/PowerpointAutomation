@@ -662,6 +662,7 @@ export function ReportGeneratorView() {
       const pptResult = await postGeneratePptStream(
         {
           clientId: selectedClient,
+          customerId: selectedMeta?.customer_id,
           startDate: reportStartDate,
           endDate: reportEndDate,
           prevDateAuto,
@@ -762,6 +763,7 @@ export function ReportGeneratorView() {
       const result = await postGeneratePptStream(
         {
           clientId: selectedClient,
+          customerId: selectedMeta?.customer_id,
           startDate: reportStartDate,
           endDate: reportEndDate,
           prevDateAuto,

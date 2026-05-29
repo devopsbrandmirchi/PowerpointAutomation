@@ -132,6 +132,7 @@ class GenerateRequest(BaseModel):
     generate_ppt: bool = True
     prev_start_date: Optional[str] = None
     prev_end_date: Optional[str] = None
+    customer_id: Optional[str] = None
 
 class AuctionInsightsRequest(BaseModel):
     customer_id: str
@@ -231,7 +232,7 @@ def _normalize_report_files(files: list[dict[str, Any]], export_mode: Optional[s
         normalized.append(item)
     return normalized
 
-def load_client_config(client_id: str):
+def load_client_config(client_id: str, customer_id_hint: Optional[str] = None):
     sb = get_supabase()
     if not sb:
         raise HTTPException(status_code=503, detail="Supabase not configured.")
@@ -239,11 +240,19 @@ def load_client_config(client_id: str):
     if not res.data:
         raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
     client_data = res.data[0]
-    
+
     raw_customer_id = client_data.get("customer_id")
     normalized_customer_id = _normalize_customer_id(raw_customer_id) or (
         str(raw_customer_id).strip() if raw_customer_id is not None else ""
     )
+    hint = _normalize_customer_id(customer_id_hint) if customer_id_hint else ""
+    if hint:
+        if normalized_customer_id and hint != normalized_customer_id:
+            print(
+                f"WARNING: client_id={client_id} customer_id hint {hint} "
+                f"!= DB {normalized_customer_id}; using hint from frontend."
+            )
+        normalized_customer_id = hint
     if not normalized_customer_id:
         raise HTTPException(
             status_code=400,
@@ -430,7 +439,7 @@ def list_clients():
             out.append({
                 "id": cid,
                 "name": row.get("descriptive_name") or cid,
-                "customer_id": row.get("customer_id"),
+                "customer_id": _normalize_customer_id(row.get("customer_id")) or str(row.get("customer_id") or ""),
                 "has_config": has_config,
             })
         return sorted(out, key=lambda x: str(x["name"]).lower())
@@ -447,7 +456,7 @@ async def generate(request: GenerateRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
-    cfg = load_client_config(request.client_id)
+    cfg = load_client_config(request.client_id, request.customer_id)
     month_label = make_month_label(request.end_date)
     result = {}
     loop = asyncio.get_running_loop()
@@ -479,7 +488,7 @@ async def generate_stream(request: GenerateRequest):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
-    cfg = load_client_config(request.client_id)
+    cfg = load_client_config(request.client_id, request.customer_id)
     month_label = make_month_label(request.end_date)
     out_q: queue.Queue = queue.Queue()
     loop = asyncio.get_running_loop()

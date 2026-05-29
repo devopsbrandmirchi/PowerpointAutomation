@@ -83,6 +83,7 @@ export async function fetchClients(opts = {}) {
  *
  * @param {{
  *   clientId: string,
+ *   customerId?: string,
  *   startDate: string,
  *   endDate: string,
  *   prevDateAuto?: boolean,
@@ -93,6 +94,7 @@ export async function fetchClients(opts = {}) {
  */
 export function buildPptGenerateRequest({
   clientId,
+  customerId,
   startDate,
   endDate,
   prevDateAuto = true,
@@ -106,6 +108,10 @@ export function buildPptGenerateRequest({
     end_date: endDate,
     generate_ppt: generatePpt,
   };
+  const cid = String(customerId || '').replace(/\D/g, '');
+  if (cid) {
+    body.customer_id = cid;
+  }
   if (!prevDateAuto) {
     const ps = String(prevStartDate || '').trim();
     const pe = String(prevEndDate || '').trim();
@@ -211,6 +217,7 @@ export async function postGenerateStream(body, onProgress) {
  *
  * @param {{
  *   clientId: string,
+ *   customerId?: string,
  *   startDate: string,
  *   endDate: string,
  *   prevDateAuto?: boolean,
