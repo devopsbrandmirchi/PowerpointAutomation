@@ -77,7 +77,48 @@ export async function fetchClients(opts = {}) {
 }
 
 /**
- * @param {{ client_id: string, start_date: string, end_date: string, generate_ppt: boolean }} body
+ * Build POST body for /generate and /generate-stream.
+ * Matches Backend GenerateRequest + run_ppt_job(cfg, start, end, month_label, prev_*).
+ * When prevDateAuto is true, prev dates are omitted so combined.py computes the previous window.
+ *
+ * @param {{
+ *   clientId: string,
+ *   startDate: string,
+ *   endDate: string,
+ *   prevDateAuto?: boolean,
+ *   prevStartDate?: string,
+ *   prevEndDate?: string,
+ *   generatePpt?: boolean,
+ * }} options
+ */
+export function buildPptGenerateRequest({
+  clientId,
+  startDate,
+  endDate,
+  prevDateAuto = true,
+  prevStartDate,
+  prevEndDate,
+  generatePpt = true,
+}) {
+  const body = {
+    client_id: String(clientId || '').trim(),
+    start_date: startDate,
+    end_date: endDate,
+    generate_ppt: generatePpt,
+  };
+  if (!prevDateAuto) {
+    const ps = String(prevStartDate || '').trim();
+    const pe = String(prevEndDate || '').trim();
+    if (ps && pe) {
+      body.prev_start_date = ps;
+      body.prev_end_date = pe;
+    }
+  }
+  return body;
+}
+
+/**
+ * @param {{ client_id: string, start_date: string, end_date: string, generate_ppt?: boolean, prev_start_date?: string, prev_end_date?: string }} body
  */
 export async function postGenerate(body) {
   const res = await fetch(`${getApiBase()}/generate`, {
@@ -162,6 +203,26 @@ export async function postGenerateStream(body, onProgress) {
 
   if (finalData == null) throw new Error('Stream ended without a result');
   return finalData;
+}
+
+/**
+ * Streamed PowerPoint generate — same payload as Backend run_ppt_job / combined.py date windows.
+ * Resolves with { ppt?: { filename, drive_url, placeholders_found }, ppt_error?: string }.
+ *
+ * @param {{
+ *   clientId: string,
+ *   startDate: string,
+ *   endDate: string,
+ *   prevDateAuto?: boolean,
+ *   prevStartDate?: string,
+ *   prevEndDate?: string,
+ *   generatePpt?: boolean,
+ * }} options
+ * @param {(ev: { event: string, payload?: Record<string, unknown>, data?: unknown, detail?: string }) => void} [onProgress]
+ */
+export async function postGeneratePptStream(options, onProgress) {
+  const body = buildPptGenerateRequest(options);
+  return postGenerateStream(body, onProgress);
 }
 
 /**

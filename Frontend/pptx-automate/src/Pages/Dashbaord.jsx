@@ -10,7 +10,7 @@ import {
   postAutomationLog,
   postDriveReport,
   postGenerateAuctionInsightsStream,
-  postGenerateStream,
+  postGeneratePptStream,
 } from '../lib/api';
 import { writeDriveReportPing } from '../lib/driveReportPing';
 
@@ -29,6 +29,7 @@ function deriveOverallPercent(lines) {
     if (typeof t !== 'string') continue;
     if (t.includes('Downloaded to:')) p = Math.max(p, 36);
     if (t.includes('Data fetched:')) p = Math.max(p, 48);
+    if (t.includes('GA4 totals:')) p = Math.max(p, 50);
     if (t.includes('Filling the template')) p = Math.max(p, 55);
     if (t.includes('PPT filled successfully')) p = Math.max(p, 68);
     if (t.includes('Placeholders replaced')) p = Math.max(p, 74);
@@ -84,19 +85,32 @@ function defaultPrevRange(start, end) {
   return { start: shiftYmdByMonths(start, -1), end: shiftYmdByMonths(end, -1) };
 }
 
-/** PPT generate body — omit prev dates in auto mode so backend uses same logic as combined.py. */
-function buildPptGenerateBody(clientId, startDate, endDate, prevDateAuto, prevStart, prevEnd) {
-  const body = {
-    client_id: clientId,
-    start_date: startDate,
-    end_date: endDate,
-    generate_ppt: true,
+/** Shared stream progress handler for PPT generate (download + log lines). */
+function handlePptStreamProgress(setStreamLogLines) {
+  return (ev) => {
+    if (ev.event !== 'progress' || !ev.payload) return;
+    const p = ev.payload;
+    setStreamLogLines((prev) => {
+      if (p.kind === 'download') {
+        const msg = p.message ?? `Downloading... ${p.percent ?? 0}%`;
+        const last = prev[prev.length - 1];
+        if (last?.isDownload) {
+          return [
+            ...prev.slice(0, -1),
+            { ...last, text: msg, downloadPercent: p.percent ?? last.downloadPercent },
+          ];
+        }
+        return [
+          ...prev,
+          { id: `dl-${Date.now()}`, text: msg, downloadPercent: p.percent, isDownload: true },
+        ];
+      }
+      if (p.kind === 'log' && p.message) {
+        return [...prev, { id: `l-${Date.now()}-${prev.length}`, text: p.message }];
+      }
+      return prev;
+    });
   };
-  if (!prevDateAuto && prevStart && prevEnd) {
-    body.prev_start_date = prevStart;
-    body.prev_end_date = prevEnd;
-  }
-  return body;
 }
 
 function collectGeneratedFiles(clientKey, exportMode, result) {
@@ -645,38 +659,17 @@ export function ReportGeneratorView() {
     let pptFailed = false;
 
     try {
-      const pptBody = buildPptGenerateBody(
-        selectedClient,
-        reportStartDate,
-        reportEndDate,
-        prevDateAuto,
-        prevStartDate,
-        prevEndDate,
+      const pptResult = await postGeneratePptStream(
+        {
+          clientId: selectedClient,
+          startDate: reportStartDate,
+          endDate: reportEndDate,
+          prevDateAuto,
+          prevStartDate,
+          prevEndDate,
+        },
+        handlePptStreamProgress(setStreamLogLines),
       );
-      const pptResult = await postGenerateStream(pptBody, (ev) => {
-        if (ev.event !== 'progress' || !ev.payload) return;
-        const p = ev.payload;
-        setStreamLogLines((prev) => {
-          if (p.kind === 'download') {
-            const msg = p.message ?? `Downloading... ${p.percent ?? 0}%`;
-            const last = prev[prev.length - 1];
-            if (last?.isDownload) {
-              return [
-                ...prev.slice(0, -1),
-                { ...last, text: msg, downloadPercent: p.percent ?? last.downloadPercent },
-              ];
-            }
-            return [
-              ...prev,
-              { id: `dl-${Date.now()}`, text: msg, downloadPercent: p.percent, isDownload: true },
-            ];
-          }
-          if (p.kind === 'log' && p.message) {
-            return [...prev, { id: `l-${Date.now()}-${prev.length}`, text: p.message }];
-          }
-          return prev;
-        });
-      });
       Object.assign(combined, pptResult);
     } catch (e) {
       pptFailed = true;
@@ -765,57 +758,30 @@ export function ReportGeneratorView() {
     setElapsedMs(0);
     const t0 = performance.now();
 
-    const body = buildPptGenerateBody(
-      selectedClient,
-      reportStartDate,
-      reportEndDate,
-      prevDateAuto,
-      prevStartDate,
-      prevEndDate,
-    );
-
     try {
-      const result = await postGenerateStream(body, (ev) => {
-        if (ev.event !== 'progress' || !ev.payload) return;
-        const p = ev.payload;
-        setStreamLogLines((prev) => {
-          if (p.kind === 'download') {
-            const msg = p.message ?? `Downloading... ${p.percent ?? 0}%`;
-            const last = prev[prev.length - 1];
-            if (last?.isDownload) {
-              return [
-                ...prev.slice(0, -1),
-                {
-                  ...last,
-                  text: msg,
-                  downloadPercent: p.percent ?? last.downloadPercent,
-                },
-              ];
-            }
-            return [
-              ...prev,
-              {
-                id: `dl-${Date.now()}`,
-                text: msg,
-                downloadPercent: p.percent,
-                isDownload: true,
-              },
-            ];
-          }
-          if (p.kind === 'log' && p.message) {
-            return [...prev, { id: `l-${Date.now()}-${prev.length}`, text: p.message }];
-          }
-          return prev;
-        });
-      });
+      const result = await postGeneratePptStream(
+        {
+          clientId: selectedClient,
+          startDate: reportStartDate,
+          endDate: reportEndDate,
+          prevDateAuto,
+          prevStartDate,
+          prevEndDate,
+        },
+        handlePptStreamProgress(setStreamLogLines),
+      );
       const ms = Math.round(performance.now() - t0);
       setGenerationResult(result);
       setGenerationPhase('complete');
 
       const parts = [];
-      if (body.generate_ppt) {
-        parts.push(result.ppt_error ? `PPT error: ${result.ppt_error}` : result.ppt ? 'PPT uploaded.' : 'PPT not returned.');
-      }
+      parts.push(
+        result.ppt_error
+          ? `PPT error: ${result.ppt_error}`
+          : result.ppt
+            ? 'PPT uploaded.'
+            : 'PPT not returned.',
+      );
       const hasErr = Boolean(result.ppt_error);
       void postAutomationLog({
         status: hasErr ? 'warning' : 'success',
