@@ -245,14 +245,19 @@ def load_client_config(client_id: str, customer_id_hint: Optional[str] = None):
     normalized_customer_id = _normalize_customer_id(raw_customer_id) or (
         str(raw_customer_id).strip() if raw_customer_id is not None else ""
     )
-    hint = _normalize_customer_id(customer_id_hint) if customer_id_hint else ""
-    if hint:
-        if normalized_customer_id and hint != normalized_customer_id:
+
+    # Supabase row is the source of truth — ignore the frontend hint when DB has a value.
+    if not normalized_customer_id and customer_id_hint:
+        normalized_customer_id = _normalize_customer_id(customer_id_hint) or str(customer_id_hint).strip()
+        print(f"INFO: client_id={client_id} customer_id missing in DB, using frontend hint {normalized_customer_id}")
+    elif customer_id_hint:
+        hint = _normalize_customer_id(customer_id_hint)
+        if hint and hint != normalized_customer_id:
             print(
-                f"WARNING: client_id={client_id} customer_id hint {hint} "
-                f"!= DB {normalized_customer_id}; using hint from frontend."
+                f"INFO: ignoring frontend customer_id hint {hint} for client_id={client_id} "
+                f"(DB value {normalized_customer_id} is authoritative)"
             )
-        normalized_customer_id = hint
+
     if not normalized_customer_id:
         raise HTTPException(
             status_code=400,
