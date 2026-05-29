@@ -6,6 +6,11 @@ from combined import build_full_data
 
 def replace_in_paragraphs(paragraphs, data, slide_num, missing_list, found_list):
     """Smart replace that checks for both {{tag}} and PLACEHOLDER_tag formats."""
+    
+    # 👇 THE FIX: Sort keys by length descending to prevent substring overlap!
+    # This forces 'ga4_total_views_pct' to process BEFORE 'ga4_total_views'
+    sorted_data = sorted(data.items(), key=lambda item: len(item[0]), reverse=True)
+    
     for para in paragraphs:
         # Collect all text in the paragraph
         full_para_text = "".join(run.text for run in para.runs)
@@ -15,7 +20,8 @@ def replace_in_paragraphs(paragraphs, data, slide_num, missing_list, found_list)
         if '{{' not in full_para_text and 'PLACEHOLDER_' not in full_para_text:
             continue
 
-        for key, value in data.items():
+        # Loop through the sorted data
+        for key, value in sorted_data:
             tag1 = f"{{{{{key}}}}}"             # Matches {{ga4_paid_views}}
             tag2 = f"PLACEHOLDER_{key}"         # Matches PLACEHOLDER_ga4_paid_views
             
@@ -81,7 +87,7 @@ def run_ppt_job(
     prev_start_date=None,
     prev_end_date=None,
 ):
-    """progress_cb receives dicts: kind \"log\" | \"download\", optional percent, message."""
+    """progress_cb receives dicts: kind "log" | "download", optional percent, message."""
 
     def emit(payload):
         if progress_cb:
@@ -148,7 +154,7 @@ if __name__ == '__main__':
     with open('config/zoomers_rv.json') as f:
         cfg = json.load(f)
 
-    result = run_ppt_job(cfg, '2026-03-02', '2026-03-05', 'March_2026')
+    result = run_ppt_job(cfg, '2026-04-01', '2026-04-30', 'April_2026')
     
     print("\n=== RESULT ===")
     print(f"File: {result['filename']}")
