@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from auction_insights import generate_auction_xlsx, upload_excel_to_drive
 from pptx_fill import run_ppt_job
 from sync_ads_to_db_GA4 import sync_ga4_data
+from combined import _normalize_customer_id, _normalize_ga4_property_id
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -239,12 +240,23 @@ def load_client_config(client_id: str):
         raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
     client_data = res.data[0]
     
+    raw_customer_id = client_data.get("customer_id")
+    normalized_customer_id = _normalize_customer_id(raw_customer_id) or (
+        str(raw_customer_id).strip() if raw_customer_id is not None else ""
+    )
+    if not normalized_customer_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Client '{client_id}' has no valid customer_id in {CLIENT_CONFIG_TABLE}.",
+        )
+
     return {
+        "client_id": client_id,
         "client_name": client_data.get("descriptive_name", client_id),
-        "customer_id": client_data.get("customer_id"),
+        "customer_id": normalized_customer_id,
         "template_drive_id": client_data.get("template_drive_id"),
         "output_file_drive_id": client_data.get("output_file_drive_id"),
-        "ga4_property_id": client_data.get("ga4_property_id"),
+        "ga4_property_id": _normalize_ga4_property_id(client_data.get("ga4_property_id")) or None,
     }
 
 def make_month_label(end_date: str) -> str:

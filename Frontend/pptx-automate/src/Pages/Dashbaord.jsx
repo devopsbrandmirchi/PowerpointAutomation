@@ -84,6 +84,21 @@ function defaultPrevRange(start, end) {
   return { start: shiftYmdByMonths(start, -1), end: shiftYmdByMonths(end, -1) };
 }
 
+/** PPT generate body — omit prev dates in auto mode so backend uses same logic as combined.py. */
+function buildPptGenerateBody(clientId, startDate, endDate, prevDateAuto, prevStart, prevEnd) {
+  const body = {
+    client_id: clientId,
+    start_date: startDate,
+    end_date: endDate,
+    generate_ppt: true,
+  };
+  if (!prevDateAuto && prevStart && prevEnd) {
+    body.prev_start_date = prevStart;
+    body.prev_end_date = prevEnd;
+  }
+  return body;
+}
+
 function collectGeneratedFiles(clientKey, exportMode, result) {
   const list = [];
   if (result?.ppt) {
@@ -630,14 +645,14 @@ export function ReportGeneratorView() {
     let pptFailed = false;
 
     try {
-      const pptBody = {
-        client_id: selectedClient,
-        start_date: reportStartDate,
-        end_date: reportEndDate,
-        prev_start_date: prevStartDate,
-        prev_end_date: prevEndDate,
-        generate_ppt: true,
-      };
+      const pptBody = buildPptGenerateBody(
+        selectedClient,
+        reportStartDate,
+        reportEndDate,
+        prevDateAuto,
+        prevStartDate,
+        prevEndDate,
+      );
       const pptResult = await postGenerateStream(pptBody, (ev) => {
         if (ev.event !== 'progress' || !ev.payload) return;
         const p = ev.payload;
@@ -750,14 +765,14 @@ export function ReportGeneratorView() {
     setElapsedMs(0);
     const t0 = performance.now();
 
-    const body = {
-      client_id: selectedClient,
-      start_date: reportStartDate,
-      end_date: reportEndDate,
-      prev_start_date: prevStartDate,
-      prev_end_date: prevEndDate,
-      generate_ppt: true,
-    };
+    const body = buildPptGenerateBody(
+      selectedClient,
+      reportStartDate,
+      reportEndDate,
+      prevDateAuto,
+      prevStartDate,
+      prevEndDate,
+    );
 
     try {
       const result = await postGenerateStream(body, (ev) => {

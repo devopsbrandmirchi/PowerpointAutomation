@@ -105,15 +105,27 @@ def run_ppt_job(
 
         print("Fetching data from Supabase/GA4...")
         emit({"kind": "log", "message": "Fetching data from Supabase/GA4..."})
+        prev_start = (prev_start_date or "").strip() or None
+        prev_end = (prev_end_date or "").strip() or None
         data = build_full_data(
-            cfg['customer_id'],
+            cfg["customer_id"],
             start_date,
             end_date,
-            ga4_property_id=cfg.get('ga4_property_id'),
-            customer_name_fallback=cfg.get('client_name'),
-            prev_start_date=prev_start_date,
-            prev_end_date=prev_end_date,
+            ga4_property_id=cfg.get("ga4_property_id"),
+            customer_name_fallback=cfg.get("client_name"),
+            prev_start_date=prev_start,
+            prev_end_date=prev_end,
+            client_id=cfg.get("client_id"),
         )
+        emit({
+            "kind": "log",
+            "message": (
+                f"GA4 totals: views={data.get('ga4_total_views')} "
+                f"sessions={data.get('ga4_total_sessions')} "
+                f"users={data.get('ga4_total_users')} "
+                f"bounce={data.get('ga4_total_bounce')}"
+            ),
+        })
         print(f"Data fetched: {len(data)} values")
         emit({"kind": "log", "message": f"Data fetched: {len(data)} values"})
 

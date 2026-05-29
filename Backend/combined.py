@@ -31,19 +31,87 @@ ga4_client = BetaAnalyticsDataClient.from_service_account_file(str(_ga4_creds_pa
 
 
 def _normalize_customer_id(value) -> str:
-    raw = str(value or "").strip()
+    """Digits-only Google Ads customer ID (handles Supabase numeric / float columns)."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        try:
+            return str(int(value))
+        except (ValueError, OverflowError):
+            pass
+    raw = str(value).strip()
+    if raw.endswith(".0") and raw[:-2].isdigit():
+        raw = raw[:-2]
     digits = "".join(ch for ch in raw if ch.isdigit())
     return digits or raw
 
 
 def _normalize_ga4_property_id(value) -> str:
-    raw = str(value or "").strip()
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        try:
+            return str(int(value))
+        except (ValueError, OverflowError):
+            pass
+    raw = str(value).strip()
     if not raw:
         return ""
     # Handle values like "123456789.0" coming from numeric DB columns.
-    if raw.endswith(".0"):
+    if raw.endswith(".0") and raw[:-2].replace(".", "", 1).isdigit():
         raw = raw[:-2]
     return "".join(ch for ch in raw if ch.isdigit())
+
+
+def resolve_ga4_property_id(customer_id, hint=None, client_id=None) -> str:
+    """
+    Resolve GA4 property from Supabase (source of truth), same as combined.py CLI.
+    Optional hint / client_id are fallbacks only when the account row has no property.
+    """
+    candidates = []
+    for cid in (
+        _normalize_customer_id(customer_id),
+        str(customer_id or "").strip(),
+        str(client_id or "").strip(),
+    ):
+        if cid and cid not in candidates:
+            candidates.append(cid)
+
+    for cid in candidates:
+        res = (
+            sb.table(CLIENT_ACCOUNT_TABLE)
+            .select("ga4_property_id")
+            .eq("customer_id", cid)
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            pid = _normalize_ga4_property_id(res.data[0].get("ga4_property_id"))
+            if pid:
+                return pid
+
+    if client_id:
+        res = (
+            sb.table(CLIENT_ACCOUNT_TABLE)
+            .select("ga4_property_id")
+            .eq("client_id", str(client_id).strip())
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            pid = _normalize_ga4_property_id(res.data[0].get("ga4_property_id"))
+            if pid:
+                return pid
+
+    return _normalize_ga4_property_id(hint)
 
 
 def fetch_descriptive_name(customer_id) -> str:
@@ -200,23 +268,10 @@ def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
         'ga4_total': empty_data.copy()
     }
 
-    property_id = _normalize_ga4_property_id(ga4_property_id)
+    property_id = _normalize_ga4_property_id(ga4_property_id) or resolve_ga4_property_id(customer_id, ga4_property_id)
     if not property_id:
-        normalized_customer_id = _normalize_customer_id(customer_id)
-        account_res = (
-            sb.table(CLIENT_ACCOUNT_TABLE).select("ga4_property_id").eq("customer_id", normalized_customer_id).execute()
-        )
-        if not account_res.data and str(customer_id).strip() != normalized_customer_id:
-            account_res = (
-                sb.table(CLIENT_ACCOUNT_TABLE).select("ga4_property_id").eq("customer_id", str(customer_id).strip()).execute()
-            )
-        if not account_res.data or not account_res.data[0].get("ga4_property_id"):
-            print(f"Warning: No GA4 Property ID found in database for client {customer_id}.")
-            return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, result)
-        property_id = _normalize_ga4_property_id(account_res.data[0]["ga4_property_id"])
-        if not property_id:
-            print(f"Warning: GA4 Property ID is invalid for client {customer_id}.")
-            return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, result)
+        print(f"Warning: No GA4 Property ID in DB for customer {customer_id} — using Supabase ga4_metrics.")
+        return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, result)
 
     request_channels = RunReportRequest(
         property=f"properties/{property_id}",
@@ -285,12 +340,49 @@ def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
     return result
 
 
+def _ga4_bucket_empty():
+    return {
+        'vdp_views': 0,
+        'sessions': 0,
+        'avg_session_duration': 0,
+        'users': 0,
+        'bounce_rate': 0,
+        'button_interactions': 0,
+        'form_fills': 0,
+        '_bounce_weighted': 0.0,
+        '_duration_weighted': 0.0,
+    }
+
+
+def _accumulate_ga4_supabase_row(bucket, row):
+    """Sum counts; session-weight bounce/duration (daily rows must not be summed raw)."""
+    sessions = int(row.get('sessions') or 0)
+    bounce = float(row.get('bounce_rate') or 0)
+    duration = float(row.get('avg_session_duration') or 0)
+    bucket['vdp_views'] += int(row.get('vdp_views') or 0)
+    bucket['sessions'] += sessions
+    bucket['users'] += int(row.get('users') or 0)
+    bucket['button_interactions'] += int(row.get('button_interactions') or 0)
+    bucket['form_fills'] += int(row.get('form_fills') or 0)
+    bucket['_bounce_weighted'] += bounce * sessions
+    bucket['_duration_weighted'] += duration * sessions
+
+
+def _finalize_ga4_supabase_bucket(bucket):
+    sessions = bucket['sessions']
+    if sessions > 0:
+        bucket['bounce_rate'] = bucket['_bounce_weighted'] / sessions
+        bucket['avg_session_duration'] = bucket['_duration_weighted'] / sessions
+    bucket.pop('_bounce_weighted', None)
+    bucket.pop('_duration_weighted', None)
+
+
 def _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, seed_result=None):
     result = seed_result or {
-        'ga4_paid': {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0},
-        'ga4_org': {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0},
-        'ga4_cross': {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0},
-        'ga4_total': {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0},
+        'ga4_paid': _ga4_bucket_empty(),
+        'ga4_org': _ga4_bucket_empty(),
+        'ga4_cross': _ga4_bucket_empty(),
+        'ga4_total': _ga4_bucket_empty(),
     }
 
     try:
@@ -308,6 +400,11 @@ def _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, seed_res
     if not rows:
         return result
 
+    print(
+        f"Warning: GA4 live API unavailable — aggregating {len(rows)} row(s) "
+        f"from Supabase for customer {customer_id} ({start_date}..{end_date})."
+    )
+
     channel_map = {
         'Paid Search': 'ga4_paid',
         'Organic Search': 'ga4_org',
@@ -315,35 +412,15 @@ def _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, seed_res
     }
 
     for row in rows:
+        # Property totals: every channel in ga4_metrics (not only Paid/Organic/Cross).
+        _accumulate_ga4_supabase_row(result['ga4_total'], row)
         channel = str(row.get('channel') or '').strip()
         key = channel_map.get(channel)
-        if not key:
-            continue
-        result[key]['vdp_views'] += int(row.get('vdp_views') or 0)
-        result[key]['sessions'] += int(row.get('sessions') or 0)
-        result[key]['users'] += int(row.get('users') or 0)
-        result[key]['button_interactions'] += int(row.get('button_interactions') or 0)
-        result[key]['form_fills'] += int(row.get('form_fills') or 0)
-        result[key]['bounce_rate'] += float(row.get('bounce_rate') or 0)
-        result[key]['avg_session_duration'] += float(row.get('avg_session_duration') or 0)
+        if key:
+            _accumulate_ga4_supabase_row(result[key], row)
 
-    # Normalize average metrics and build total.
-    present_channels = 0
-    for key in ('ga4_paid', 'ga4_org', 'ga4_cross'):
-        ch = result[key]
-        if ch['sessions'] > 0:
-            present_channels += 1
-        result['ga4_total']['vdp_views'] += ch['vdp_views']
-        result['ga4_total']['sessions'] += ch['sessions']
-        result['ga4_total']['users'] += ch['users']
-        result['ga4_total']['button_interactions'] += ch['button_interactions']
-        result['ga4_total']['form_fills'] += ch['form_fills']
-        result['ga4_total']['bounce_rate'] += ch['bounce_rate']
-        result['ga4_total']['avg_session_duration'] += ch['avg_session_duration']
-
-    if present_channels > 0:
-        result['ga4_total']['bounce_rate'] = result['ga4_total']['bounce_rate'] / present_channels
-        result['ga4_total']['avg_session_duration'] = result['ga4_total']['avg_session_duration'] / present_channels
+    for key in ('ga4_paid', 'ga4_org', 'ga4_cross', 'ga4_total'):
+        _finalize_ga4_supabase_bucket(result[key])
 
     return result
 
@@ -391,20 +468,26 @@ def build_full_data(
     customer_name_fallback=None,
     prev_start_date=None,
     prev_end_date=None,
+    client_id=None,
 ):
     """Current window = [start_date, end_date]. Previous window:
        - If prev_start_date/prev_end_date are passed, use them.
        - Otherwise default to the same length shifted back exactly 1 month
          (e.g. Mar 15–25 → Feb 15–25), NOT "the whole previous calendar month".
     """
+    customer_id = _normalize_customer_id(customer_id) or str(customer_id or "").strip()
+    ga4_property_id = resolve_ga4_property_id(customer_id, ga4_property_id, client_id=client_id)
+
     current = fetch_data(customer_id, start_date, end_date, ga4_property_id=ga4_property_id)
 
     s = datetime.strptime(start_date, "%Y-%m-%d")
     e = datetime.strptime(end_date, "%Y-%m-%d")
 
-    if prev_start_date and prev_end_date:
-        prev_start = prev_start_date
-        prev_end = prev_end_date
+    prev_start_in = (prev_start_date or "").strip() or None
+    prev_end_in = (prev_end_date or "").strip() or None
+    if prev_start_in and prev_end_in:
+        prev_start = prev_start_in
+        prev_end = prev_end_in
         prev_s = datetime.strptime(prev_start, "%Y-%m-%d")
         prev_source = "client-provided"
     else:
@@ -415,7 +498,7 @@ def build_full_data(
         prev_source = "auto-shifted"
 
     print(
-        f" -> DEBUG: customer={customer_id} | "
+        f" -> DEBUG: customer={customer_id} | ga4_property={ga4_property_id or 'none'} | "
         f"current={start_date}..{end_date} | "
         f"previous={prev_start}..{prev_end} ({prev_source})"
     )
@@ -575,9 +658,9 @@ def build_full_data(
     return data
 
 if __name__ == '__main__':
-    TEST_CUSTOMER_ID = 5691491477
-    START_DATE = '2026-03-01'
-    END_DATE = '2026-03-31' 
+    TEST_CUSTOMER_ID = 6999622645
+    START_DATE = '2026-04-01'
+    END_DATE = '2026-04-30' 
     
     result = build_full_data(TEST_CUSTOMER_ID, START_DATE, END_DATE)
     print("\n=== DATA RETURNED ===")
