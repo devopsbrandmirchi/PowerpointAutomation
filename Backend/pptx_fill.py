@@ -4,7 +4,7 @@ import os
 import re
 import tempfile
 from drive_utils import get_drive_service, download_file, update_file
-from combined import build_full_data
+from combined import build_full_data, resolve_ga4_property_id
 
 # Short tag names used in some templates → ga4_total_* (property totals from combined.py).
 _TAG_ALIASES = {
@@ -202,11 +202,27 @@ def run_ppt_job(
         prev_start = (prev_start_date or "").strip() or None
         prev_end = (prev_end_date or "").strip() or None
 
-        # Same call shape as combined.py __main__ — property resolved inside build_full_data.
+        ga4_property = resolve_ga4_property_id(
+            cfg["customer_id"],
+            cfg.get("ga4_property_id"),
+            client_id=cfg.get("client_id"),
+        )
+        prev_source = "client-provided" if prev_start and prev_end else "auto-shifted"
+        emit({
+            "kind": "log",
+            "message": (
+                f" -> DEBUG: customer={cfg['customer_id']} | ga4_property={ga4_property or 'none'} | "
+                f"current={start_date}..{end_date} | "
+                f"previous={'..'.join([prev_start, prev_end]) if prev_start and prev_end else 'auto'} ({prev_source})"
+            ),
+        })
+
+        # Same call shape as combined.py __main__ + pptx_fill CLI config JSON.
         data = build_full_data(
             cfg["customer_id"],
             start_date,
             end_date,
+            ga4_property_id=cfg.get("ga4_property_id"),
             customer_name_fallback=cfg.get("client_name"),
             prev_start_date=prev_start,
             prev_end_date=prev_end,

@@ -259,19 +259,54 @@ def aggregate_ads(rows):
         'impression_share': true_impr_share,
     }
     
+def _ga4_metrics_row_from_response_row(row):
+    return {
+        'vdp_views': int(row.metric_values[0].value),
+        'sessions': int(row.metric_values[1].value),
+        'avg_session_duration': float(row.metric_values[2].value),
+        'users': int(row.metric_values[3].value),
+        'bounce_rate': float(row.metric_values[4].value),
+        'button_interactions': 0,
+        'form_fills': 0,
+    }
+
+
+def _fetch_ga4_property_totals(property_id, start_date, end_date):
+    """Property-level GA4 totals (no channel dimension) — same as combined.py CLI."""
+    request_totals = RunReportRequest(
+        property=f"properties/{property_id}",
+        metrics=[
+            Metric(name="screenPageViews"),
+            Metric(name="sessions"),
+            Metric(name="averageSessionDuration"),
+            Metric(name="totalUsers"),
+            Metric(name="bounceRate"),
+        ],
+        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+    )
+    try:
+        response_totals = ga4_client.run_report(request_totals)
+    except Exception as e:
+        print(f"GA4 property totals fetch failed for property {property_id}: {e}")
+        return None
+    if not response_totals.rows:
+        return None
+    return _ga4_metrics_row_from_response_row(response_totals.rows[0])
+
+
 def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
     empty_data = {'vdp_views': 0, 'sessions': 0, 'avg_session_duration': 0, 'users': 0, 'bounce_rate': 0, 'button_interactions': 0, 'form_fills': 0}
     result = {
-        'ga4_paid': empty_data.copy(), 
-        'ga4_org': empty_data.copy(), 
+        'ga4_paid': empty_data.copy(),
+        'ga4_org': empty_data.copy(),
         'ga4_cross': empty_data.copy(),
-        'ga4_total': empty_data.copy()
+        'ga4_total': empty_data.copy(),
     }
 
     property_id = _normalize_ga4_property_id(ga4_property_id) or resolve_ga4_property_id(customer_id, ga4_property_id)
     if not property_id:
         print(f"Warning: No GA4 Property ID in DB for customer {customer_id} — using Supabase ga4_metrics.")
-        return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, None)
+        return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, None, property_id=None)
 
     request_channels = RunReportRequest(
         property=f"properties/{property_id}",
@@ -281,62 +316,49 @@ def fetch_ga4_live(customer_id, start_date, end_date, ga4_property_id=None):
             Metric(name="sessions"),
             Metric(name="averageSessionDuration"),
             Metric(name="totalUsers"),
-            Metric(name="bounceRate")
-        ],
-        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
-    )
-    
-    request_totals = RunReportRequest(
-        property=f"properties/{property_id}",
-        metrics=[
-            Metric(name="screenPageViews"),
-            Metric(name="sessions"),
-            Metric(name="averageSessionDuration"),
-            Metric(name="totalUsers"),
-            Metric(name="bounceRate")
+            Metric(name="bounceRate"),
         ],
         date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
     )
 
+    channels_ok = False
     try:
         response_channels = ga4_client.run_report(request_channels)
-        response_totals = ga4_client.run_report(request_totals)
+        channels_ok = True
     except Exception as e:
-        print(f"GA4 API Live Fetch Error for customer {customer_id}: {e} — using Supabase ga4_metrics.")
-        return _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, None)
+        print(f"GA4 channel fetch error for customer {customer_id}: {e}")
+
+    totals = _fetch_ga4_property_totals(property_id, start_date, end_date)
+    if totals:
+        result['ga4_total'] = totals
+
+    if not channels_ok:
+        print(f"GA4 API channel fetch failed for customer {customer_id} — using Supabase ga4_metrics for channels.")
+        supabase_result = _fetch_ga4_from_supabase_metrics(
+            customer_id, start_date, end_date, result, property_id=property_id,
+        )
+        if totals:
+            supabase_result['ga4_total'] = totals
+        return supabase_result
 
     channel_map = {
         'Paid Search': 'ga4_paid',
         'Organic Search': 'ga4_org',
-        'Cross-network': 'ga4_cross'
+        'Cross-network': 'ga4_cross',
     }
 
     for row in response_channels.rows:
         channel = row.dimension_values[0].value
         if channel in channel_map:
             key = channel_map[channel]
-            result[key] = {
-                'vdp_views': int(row.metric_values[0].value),
-                'sessions': int(row.metric_values[1].value),
-                'avg_session_duration': float(row.metric_values[2].value),
-                'users': int(row.metric_values[3].value),
-                'bounce_rate': float(row.metric_values[4].value),
-                'button_interactions': 0,
-                'form_fills': 0
-            }
-            
-    if response_totals.rows:
-        total_row = response_totals.rows[0]
-        result['ga4_total'] = {
-            'vdp_views': int(total_row.metric_values[0].value),
-            'sessions': int(total_row.metric_values[1].value),
-            'avg_session_duration': float(total_row.metric_values[2].value),
-            'users': int(total_row.metric_values[3].value),
-            'bounce_rate': float(total_row.metric_values[4].value),
-            'button_interactions': 0,
-            'form_fills': 0
-        }
-            
+            result[key] = _ga4_metrics_row_from_response_row(row)
+
+    if not totals:
+        print(
+            f"Warning: GA4 property totals unavailable for customer {customer_id} "
+            f"— channel breakdown only (totals may be incomplete)."
+        )
+
     return result
 
 
@@ -394,7 +416,7 @@ def _finalize_ga4_supabase_bucket(bucket):
     bucket.pop('_duration_weighted', None)
 
 
-def _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, seed_result=None):
+def _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, seed_result=None, property_id=None):
     if seed_result:
         result = {
             'ga4_paid': _ensure_supabase_bucket(seed_result.get('ga4_paid')),
@@ -437,15 +459,27 @@ def _fetch_ga4_from_supabase_metrics(customer_id, start_date, end_date, seed_res
     }
 
     for row in rows:
-        # Property totals: every channel in ga4_metrics (not only Paid/Organic/Cross).
-        _accumulate_ga4_supabase_row(result['ga4_total'], row)
         channel = str(row.get('channel') or '').strip()
         key = channel_map.get(channel)
         if key:
             _accumulate_ga4_supabase_row(result[key], row)
 
-    for key in ('ga4_paid', 'ga4_org', 'ga4_cross', 'ga4_total'):
+    for key in ('ga4_paid', 'ga4_org', 'ga4_cross'):
         _finalize_ga4_supabase_bucket(result[key])
+
+    # Property totals must come from GA4 API — never sum all Supabase channel rows.
+    pid = _normalize_ga4_property_id(property_id) or resolve_ga4_property_id(customer_id)
+    totals = _fetch_ga4_property_totals(pid, start_date, end_date) if pid else None
+    if totals:
+        result['ga4_total'] = totals
+    elif seed_result and isinstance(seed_result.get('ga4_total'), dict):
+        result['ga4_total'] = _ensure_supabase_bucket(seed_result.get('ga4_total'))
+    else:
+        print(
+            f"Warning: GA4 property totals unavailable from API for customer {customer_id} "
+            f"({start_date}..{end_date}); ga4_total left at zero (not channel-summed)."
+        )
+        _finalize_ga4_supabase_bucket(result['ga4_total'])
 
     return result
 
@@ -683,7 +717,7 @@ def build_full_data(
     return data
 
 if __name__ == '__main__':
-    TEST_CUSTOMER_ID = 6999622645
+    TEST_CUSTOMER_ID = 8881717635
     START_DATE = '2026-04-01'
     END_DATE = '2026-04-30' 
     
